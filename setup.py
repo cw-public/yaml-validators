@@ -9,4 +9,9 @@ setup(
         'helm_validator',
     ],
     install_requires=['ruamel.yaml>=0.17.0'],
+    entry_points={
+        'console_scripts': [
+            'yaml-router=yaml_router:main',
+        ],
+    },
 )
