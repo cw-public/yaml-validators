@@ -1,12 +1,8 @@
 - id: yaml-router
   name: YAML Router
   description: Auto-detects and validates Helm Templates & K8s Manifests
-  entry: powershell/pre-commit/yaml_validator/yaml_router.py
-  language: python
+  entry: python yaml_router.py
+  language: system
   files: \.(yaml|yml)$
-  exclude: |
-    (?x)^(
-        \.pre-commit-config\.yaml$
-    )
   types: [file]
-  additional_dependencies: ['ruamel.yaml>=0.17.0']
+  pass_filenames: true
