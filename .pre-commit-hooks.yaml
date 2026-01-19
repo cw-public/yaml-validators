@@ -1,7 +1,7 @@
 - id: yaml-router
   name: YAML Router
   description: Auto-detects and validates Helm Templates & K8s Manifests
-  entry: python yaml_router.py
+  entry: yaml_router.py
+  language: python
   files: \.(yaml|yml)$
   types: [file]
-  pass_filenames: true
