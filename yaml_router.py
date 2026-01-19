@@ -199,12 +199,12 @@ class FileTypeDetector:
 # ============================================================================
 
 class AnsibleValidator:
-    """Ansible Lint via WSL - Pfad-Konvertierung in Python"""
+    """Ansible Lint via WSL - mit Login-Shell für korrekten PATH"""
     
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
         self.wsl_available = self._check_wsl()
-        self.ansible_lint_available = self._check_ansible_lint()
+        self.ansible_lint_cmd = self._find_ansible_lint()
     
     def _check_wsl(self) -> bool:
         """Prüft ob WSL verfügbar ist"""
@@ -221,31 +221,51 @@ class AnsibleValidator:
         except Exception:
             return False
     
-    def _check_ansible_lint(self) -> bool:
-        """Prüft ob ansible-lint in WSL verfügbar ist"""
+    def _find_ansible_lint(self) -> str:
+        """Findet ansible-lint in WSL (mit Login-Shell für korrekten PATH)"""
         if not self.wsl_available:
-            return False
+            return None
         
         try:
+            # Mit Login-Shell (-l) um .bashrc/.profile zu laden
             result = subprocess.run(
-                ['wsl', 'which', 'ansible-lint'],
+                ['wsl', 'bash', '-l', '-c', 'which ansible-lint'],
                 capture_output=True,
                 text=True,
                 timeout=10
             )
-            return result.returncode == 0
+            
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+            
+            # Fallback: Prüfe Standard-Pfade explizit
+            standard_paths = [
+                '$HOME/.local/bin/ansible-lint',
+                '/usr/local/bin/ansible-lint',
+                '/usr/bin/ansible-lint',
+            ]
+            
+            for path in standard_paths:
+                result = subprocess.run(
+                    ['wsl', 'bash', '-c', f'test -x {path} && echo {path}'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()
+            
+            return None
+            
         except Exception:
-            return False
+            return None
     
     def _windows_to_wsl_path(self, windows_path: str) -> str:
         """Konvertiert Windows-Pfad zu WSL-Pfad"""
-        # Absoluter Pfad
         path = str(Path(windows_path).absolute())
-        
-        # Ersetze Backslashes mit Forward-Slashes
         path = path.replace('\\', '/')
         
-        # Konvertiere Drive Letter: C:/... -> /mnt/c/...
         if len(path) >= 2 and path[1] == ':':
             drive = path[0].lower()
             path = f'/mnt/{drive}{path[2:]}'
@@ -255,7 +275,6 @@ class AnsibleValidator:
     def validate(self, filepath: str) -> dict:
         """Führt ansible-lint via WSL aus"""
         
-        # Check: WSL verfügbar?
         if not self.wsl_available:
             return {
                 "success": True,
@@ -267,8 +286,7 @@ class AnsibleValidator:
                 "warnings": [],
             }
         
-        # Check: ansible-lint verfügbar?
-        if not self.ansible_lint_available:
+        if not self.ansible_lint_cmd:
             return {
                 "success": True,
                 "file": filepath,
@@ -279,18 +297,19 @@ class AnsibleValidator:
                 "warnings": [],
             }
         
-        # Konvertiere Pfad in Python (NICHT im Wrapper!)
         wsl_path = self._windows_to_wsl_path(filepath)
         
         if self.verbose:
             print(f"   [INFO] Running ansible-lint via WSL...")
-            print(f"   [INFO] Windows path: {filepath}")
+            print(f"   [INFO] ansible-lint: {self.ansible_lint_cmd}")
             print(f"   [INFO] WSL path: {wsl_path}")
         
         try:
-            # Rufe ansible-lint direkt auf mit konvertiertem Pfad
+            # Nutze bash -l -c für Login-Shell (lädt PATH korrekt)
+            cmd = f'{self.ansible_lint_cmd} --nocolor --parseable "{wsl_path}"'
+            
             result = subprocess.run(
-                ['wsl', 'ansible-lint', '--nocolor', '--parseable', wsl_path],
+                ['wsl', 'bash', '-l', '-c', cmd],
                 capture_output=True,
                 text=True,
                 timeout=120
@@ -299,7 +318,6 @@ class AnsibleValidator:
             errors = []
             warnings = []
             
-            # Parse Output
             output = result.stdout + result.stderr
             
             for line in output.split('\n'):
@@ -307,24 +325,19 @@ class AnsibleValidator:
                 if not line:
                     continue
                 
-                # ansible-lint parseable format: filename:line:column: rule message
                 if ':' in line:
                     line_lower = line.lower()
                     
-                    # Errors
                     if any(x in line_lower for x in ['error', 'fatal', 'syntax-check']):
                         errors.append(line)
-                    # Warnings (alles andere mit Rule-Pattern)
                     elif any(x in line_lower for x in 
                             ['warning', 'risky', 'deprecated', 'name[', 'yaml[', 
                              'fqcn[', 'no-changed-when', 'command-instead', 
                              'package-latest', 'literal-compare']):
                         warnings.append(line)
-                    # Generische Lint-Meldungen (hat Zeilen/Spalten-Nummern)
                     elif re.match(r'.*:\d+:\d+:', line):
                         warnings.append(line)
             
-            # Wenn Exit-Code != 0 aber keine spezifischen Fehler gefunden
             if result.returncode != 0 and not errors and not warnings:
                 errors.append(f"ansible-lint exited with code {result.returncode}")
                 if result.stderr.strip():
