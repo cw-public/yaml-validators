@@ -8,9 +8,14 @@ YAML Router - Unified Entry Point
 
 import re
 import sys
+import os
 import argparse
 from pathlib import Path
 from ruamel.yaml import YAML
+
+# Force UTF-8 encoding on Windows
+if sys.platform == 'win32':
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 # Relative imports für Pre-Commit
 try:

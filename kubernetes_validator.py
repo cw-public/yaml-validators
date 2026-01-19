@@ -8,16 +8,15 @@ Kubernetes Manifest Validator
 
 import re
 import sys
+import os
 import argparse
 from pathlib import Path
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
-# Force UTF-8 output on Windows
+# Force UTF-8 encoding on Windows
 if sys.platform == 'win32':
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 
 class K8sValidator:
