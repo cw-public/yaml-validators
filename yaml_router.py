@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# filepath: c:\Users\ahryhory\Documents\Git-repos\tools\powershell\pre-commit\yaml_validator\yaml_router.py
+# filepath: c:\Users\ahryhory\Documents\Git-repos\yaml-validators\yaml_router.py
 """
 YAML Router - Unified Entry Point
 - Erkennt automatisch Helm Charts vs Kubernetes Manifeste
@@ -143,7 +143,7 @@ class YamlRouter:
         file_type = FileTypeDetector.detect(file_path, content, data or {})
         
         if self.verbose:
-            print(f"\n📄 {filepath}")
+            print(f"\n[FILE] {filepath}")
             print(f"   Type: {file_type.upper()}")
         
         # Route to validator
@@ -202,7 +202,7 @@ class YamlRouter:
     def _validate_generic(self, filepath: str) -> dict:
         """Generic YAML - nur Syntax-Check (bereits geparsed = OK)"""
         if self.verbose:
-            print(f"   ✅ Valid YAML (generic)")
+            print(f"   [OK] Valid YAML (generic)")
         return {
             "success": True,
             "file": filepath,
@@ -233,22 +233,22 @@ def main():
         
         # Output
         if not args.verbose and result.get('type') != 'helm':
-            print(f"\n📄 {filepath}")
+            print(f"\n[FILE] {filepath}")
             print(f"   Type: {result.get('type', 'unknown').upper()}")
         
         if result.get('errors'):
             exit_code = 1
             for err in result['errors']:
                 if 'see output above' not in err:
-                    print(f"   ❌ {err}")
+                    print(f"   [ERROR] {err}")
         
         if result.get('warnings'):
             for warn in result['warnings']:
-                print(f"   ⚠️  {warn}")
+                print(f"   [WARNING] {warn}")
         
         if result.get('success') and not result.get('errors'):
             if result.get('type') != 'helm':
-                print(f"   ✅ Valid")
+                print(f"   [OK] Valid")
     
     sys.exit(exit_code)
 
