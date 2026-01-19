@@ -1,8 +1,16 @@
+#!/usr/bin/env python3
+# filepath: c:\Users\ahryhory\Documents\Git-repos\yaml-validators\helm_validator.py
 from ruamel.yaml import YAML
 import re
 import sys
 import tempfile
 from pathlib import Path
+
+# Force UTF-8 output on Windows
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # Importiere yamllint als Library
 try:
@@ -406,7 +414,7 @@ def validate_helm_template(input_file, values_source=None, yamllint_config=None,
     
     # Prüfe ob Eingabedatei existiert
     if not input_path.exists():
-        print(f"✗ Fehler: Datei '{input_file}' nicht gefunden.")
+        print(f"[ERROR] Fehler: Datei '{input_file}' nicht gefunden.")
         return 1
     
     # Prüfe ob es ein Helm-Chart ist
@@ -416,13 +424,13 @@ def validate_helm_template(input_file, values_source=None, yamllint_config=None,
         # Prüfe ob die Datei Helm-Template-Syntax enthält
         if is_helm_template_file(input_file):
             if verbose:
-                print(f"⚠ Datei enthält Helm-Template-Syntax aber keine Chart-Struktur gefunden.")
+                print(f"[WARNING] Datei enthält Helm-Template-Syntax aber keine Chart-Struktur gefunden.")
                 print(f"  Verwende --force um trotzdem zu validieren.")
             return 1
         else:
             # Keine Helm-Datei, überspringe
             if verbose:
-                print(f"→ Keine Helm-Template-Datei: {input_file}")
+                print(f"[SKIP] Keine Helm-Template-Datei: {input_file}")
             return 0
     
     if verbose:
@@ -437,7 +445,7 @@ def validate_helm_template(input_file, values_source=None, yamllint_config=None,
     # Prüfe ob Datei Helm-Template-Syntax enthält
     if not is_helm_template_file(input_file):
         if verbose:
-            print(f"→ Keine Helm-Template-Syntax gefunden, überspringe.")
+            print(f"[SKIP] Keine Helm-Template-Syntax gefunden, überspringe.")
         return 0
     
     # Values laden
@@ -455,7 +463,7 @@ def validate_helm_template(input_file, values_source=None, yamllint_config=None,
             type_map = load_values_file(auto_values_source)
     
     if verbose and type_map:
-        print(f"✓ {len(type_map)} Variablen aus Values geladen")
+        print(f"[OK] {len(type_map)} Variablen aus Values geladen")
     
     # Phase 1: Helm-Syntax entfernen für Linting
     cleaned_content, bracket_info = remove_helm_template_syntax_for_linting(content)
@@ -467,19 +475,19 @@ def validate_helm_template(input_file, values_source=None, yamllint_config=None,
     lint_success, lint_errors = run_yamllint(cleaned_content, yamllint_config)
     
     if not lint_success:
-        print(f"\n✗ yamllint Fehler in {input_file}:")
+        print(f"\n[ERROR] yamllint Fehler in {input_file}:")
         print(lint_errors)
         return 1
     
     if verbose:
-        print(f"✓ yamllint: OK")
+        print(f"[OK] yamllint: OK")
         print(f"\n--- Phase 2: Bracket-Validierung ---")
     
     # Phase 3: Bracket-Validierung
     bracket_errors = validate_brackets(content, type_map)
     
     if bracket_errors:
-        print(f"\n✗ Bracket-Fehler in {input_file}:")
+        print(f"\n[ERROR] Bracket-Fehler in {input_file}:")
         print(f"  {len(bracket_errors)} Fehler gefunden:\n")
         
         for error in bracket_errors:
@@ -489,8 +497,8 @@ def validate_helm_template(input_file, values_source=None, yamllint_config=None,
         return 1
     
     if verbose:
-        print(f"✓ Bracket-Validierung: OK")
-        print(f"\n✓ {input_file}: Alle Prüfungen bestanden")
+        print(f"[OK] Bracket-Validierung: OK")
+        print(f"\n[OK] {input_file}: Alle Prüfungen bestanden")
     
     return 0
 
@@ -540,7 +548,7 @@ def main():
             i += 1
     
     if not input_file:
-        print("✗ Keine Eingabedatei angegeben.")
+        print("[ERROR] Keine Eingabedatei angegeben.")
         sys.exit(1)
     
     # Validierung ausführen

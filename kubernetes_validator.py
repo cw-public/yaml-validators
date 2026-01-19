@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# filepath: c:\Users\ahryhory\Documents\Git-repos\yaml-validators\kubernetes_validator.py
 """
 Kubernetes Manifest Validator
 - VOR spec: Nicht quoten (apiVersion, kind, metadata.*)
@@ -11,6 +12,12 @@ import argparse
 from pathlib import Path
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
+
+# Force UTF-8 output on Windows
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 
 class K8sValidator:
@@ -137,12 +144,12 @@ class K8sValidator:
                     
                     if should_quote and not is_quoted:
                         self.errors.append(
-                            f"line {line}: {path_str}: {value} → should be \"{value}\""
+                            f"line {line}: {path_str}: {value} -> should be \"{value}\""
                         )
                     elif not should_quote and is_quoted:
                         # Optional: Warnung wenn pre-spec gequotet ist
                         self.warnings.append(
-                            f"line {line}: {path_str}: \"{value}\" → should NOT be quoted ({reason})"
+                            f"line {line}: {path_str}: \"{value}\" -> should NOT be quoted ({reason})"
                         )
                 
                 elif self.is_boolean(value):
@@ -176,7 +183,7 @@ class K8sValidator:
                     if should_quote and not is_quoted:
                         path_str = '.'.join(str(p) for p in current_path)
                         self.errors.append(
-                            f"line {line}: {path_str}: {item} → should be \"{item}\""
+                            f"line {line}: {path_str}: {item} -> should be \"{item}\""
                         )
     
     def validate(self, filepath: str) -> dict:
@@ -206,7 +213,7 @@ class K8sValidator:
         if self.verbose:
             kind = data.get('kind', 'Unknown')
             name = data.get('metadata', {}).get('name', 'unknown')
-            print(f"✅ Detected K8s Manifest: {kind}/{name}")
+            print(f"[OK] Detected K8s Manifest: {kind}/{name}")
         
         # 2. Validate Structure
         self.validate_structure(data)
@@ -241,23 +248,23 @@ def main():
         
         if result.get('skipped'):
             if args.verbose:
-                print(f"⏭️  SKIP: {filepath} - {result.get('message')}")
+                print(f"[SKIP] {filepath} - {result.get('message')}")
             continue
         
-        print(f"\n📄 {filepath}")
+        print(f"\n[FILE] {filepath}")
         print(f"   Kind: {result.get('kind')} | Name: {result.get('name')}")
         
         if result.get('errors'):
             exit_code = 1
             for err in result['errors']:
-                print(f"   ❌ {err}")
+                print(f"   [ERROR] {err}")
         
         if result.get('warnings'):
             for warn in result['warnings']:
-                print(f"   ⚠️  {warn}")
+                print(f"   [WARNING] {warn}")
         
         if result.get('success') and not result.get('errors'):
-            print(f"   ✅ No quoting issues found")
+            print(f"   [OK] No quoting issues found")
     
     sys.exit(exit_code)
 
