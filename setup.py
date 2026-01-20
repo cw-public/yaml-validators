@@ -8,7 +8,10 @@ setup(
         'kubernetes_validator',
         'helm_validator',
     ],
-    install_requires=['ruamel.yaml>=0.17.0'],
+    install_requires=[
+        'ruamel.yaml>=0.17.0',
+        'yamllint>=1.32',
+        ],
     entry_points={
         'console_scripts': [
             'yaml-router=yaml_router:main',
