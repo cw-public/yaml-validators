@@ -1140,7 +1140,7 @@ def main():
         print("  --force            Verarbeitung erzwingen")
         print("  --strict           Warnungen als Fehler behandeln")
         print("  --verbose, -v      Ausführliche Ausgabe")
-        print("\nBeispiele:")t
+        print("\nBeispiele:")
         print("  python helm_validator.py chart/templates/deployment.yaml")
         print("  python helm_validator.py deployment.yaml --config .yamllint.yaml -v")
         print("  python helm_validator.py deployment.yaml --values ../values/ --strict")
