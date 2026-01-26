@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# filepath: c:\Users\ahryhory\Documents\Git-repos\yaml-validators\yaml_router.py
 """
-YAML Router - Unified Entry Point
-- YAMLlint für alle Dateien
-- Erkennt automatisch Helm Charts, K8s Manifeste, Ansible Playbooks
+YAML Router - Unified Entry Point für YAML Validierung
+
+- YAMLlint für alle Dateien (außer Helm Templates)
+- Erkennt automatisch: Helm Charts, K8s Manifeste, Ansible Playbooks
 - Routet zur passenden Validierung
 """
 
@@ -25,19 +25,23 @@ if sys.platform == 'win32':
 
 # Relative imports für Pre-Commit
 try:
-    from kubernetes_validator import KubernetesQuoteValidator as K8sValidator
+    from kubernetes_validator import KubernetesQuoteValidator, Severity, ValidationResult
     from helm_validator import validate_helm_template
 except ImportError:
     import importlib.util
     
+    # kubernetes_validator
     spec = importlib.util.spec_from_file_location(
         "kubernetes_validator", 
         Path(__file__).parent / "kubernetes_validator.py"
     )
     kubernetes_validator = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(kubernetes_validator)
-    K8sValidator = kubernetes_validator.K8sValidator
+    KubernetesQuoteValidator = kubernetes_validator.KubernetesQuoteValidator
+    Severity = kubernetes_validator.Severity
+    ValidationResult = kubernetes_validator.ValidationResult
     
+    # helm_validator
     spec = importlib.util.spec_from_file_location(
         "helm_validator",
         Path(__file__).parent / "helm_validator.py"
@@ -70,7 +74,7 @@ rules:
   comments:
     min-spaces-from-content: 1
   document-start:
-    present: true
+    present: false
   trailing-spaces: enable
   new-line-at-end-of-file: enable
   empty-lines:
@@ -88,8 +92,7 @@ rules:
         self.config = self._load_config(config_file)
     
     def _load_config(self, config_file: str = None) -> YamlLintConfig:
-        """Lädt YAMLlint Config aus Datei oder nutzt Default"""
-        
+        """Lädt YAMLlint Config aus Datei oder nutzt Default."""
         if config_file and Path(config_file).exists():
             if self.verbose:
                 print(f"   [INFO] Using yamllint config: {config_file}")
@@ -113,8 +116,7 @@ rules:
         return YamlLintConfig(content=self.DEFAULT_CONFIG)
     
     def validate(self, filepath: str, content: str = None) -> dict:
-        """Führt YAMLlint auf einer Datei aus"""
-        
+        """Führt YAMLlint auf einer Datei aus."""
         file_path = Path(filepath)
         
         if content is None:
@@ -171,7 +173,7 @@ rules:
 # ============================================================================
 
 class FileTypeDetector:
-    """Erkennt den Dateityp: Helm Template, K8s Manifest, Ansible, oder Generic YAML"""
+    """Erkennt den Dateityp: Helm Template, K8s Manifest, Ansible, oder Generic YAML."""
     
     HELM_PATTERNS = [
         r'\{\{\s*\.Values\.',
@@ -206,7 +208,7 @@ class FileTypeDetector:
     
     @staticmethod
     def is_helm_template(content: str, file_path: Path) -> bool:
-        """Prüft ob Datei ein Helm Template ist"""
+        """Prüft ob Datei ein Helm Template ist."""
         for pattern in FileTypeDetector.HELM_PATTERNS:
             if re.search(pattern, content):
                 return True
@@ -223,14 +225,14 @@ class FileTypeDetector:
     
     @staticmethod
     def is_k8s_manifest(data: dict) -> bool:
-        """Prüft ob Datei ein Kubernetes Manifest ist"""
+        """Prüft ob Datei ein Kubernetes Manifest ist."""
         if not isinstance(data, dict):
             return False
         return 'apiVersion' in data and 'kind' in data
     
     @staticmethod
     def is_ansible_file(data, file_path: Path) -> bool:
-        """Prüft ob Datei ein Ansible Playbook/Role/Task ist"""
+        """Prüft ob Datei ein Ansible Playbook/Role/Task ist."""
         path_str = str(file_path).replace('\\', '/').lower()
         ansible_dirs = ['/playbooks/', '/roles/', '/tasks/', '/handlers/', 
                        '/vars/', '/defaults/', '/group_vars/', '/host_vars/']
@@ -283,7 +285,7 @@ class FileTypeDetector:
     
     @staticmethod
     def detect(file_path: Path, content: str, data) -> str:
-        """Erkennt den Dateityp"""
+        """Erkennt den Dateityp."""
         if FileTypeDetector.is_helm_template(content, file_path):
             return 'helm'
         
@@ -301,7 +303,7 @@ class FileTypeDetector:
 # ============================================================================
 
 class AnsibleValidator:
-    """Ansible Lint via WSL - mit Login-Shell für korrekten PATH"""
+    """Ansible Lint via WSL - mit Login-Shell für korrekten PATH."""
     
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
@@ -309,7 +311,7 @@ class AnsibleValidator:
         self.ansible_lint_cmd = self._find_ansible_lint()
     
     def _check_wsl(self) -> bool:
-        """Prüft ob WSL verfügbar ist"""
+        """Prüft ob WSL verfügbar ist."""
         if sys.platform != 'win32':
             return False
         
@@ -324,7 +326,7 @@ class AnsibleValidator:
             return False
     
     def _find_ansible_lint(self) -> str:
-        """Findet ansible-lint in WSL (mit Login-Shell für korrekten PATH)"""
+        """Findet ansible-lint in WSL."""
         if not self.wsl_available:
             return None
         
@@ -362,7 +364,7 @@ class AnsibleValidator:
             return None
     
     def _windows_to_wsl_path(self, windows_path: str) -> str:
-        """Konvertiert Windows-Pfad zu WSL-Pfad"""
+        """Konvertiert Windows-Pfad zu WSL-Pfad."""
         path = str(Path(windows_path).absolute())
         path = path.replace('\\', '/')
         
@@ -373,8 +375,7 @@ class AnsibleValidator:
         return path
     
     def validate(self, filepath: str) -> dict:
-        """Führt ansible-lint via WSL aus"""
-        
+        """Führt ansible-lint via WSL aus."""
         if not self.wsl_available:
             return {
                 "success": True,
@@ -441,8 +442,6 @@ class AnsibleValidator:
                 errors.append(f"ansible-lint exited with code {result.returncode}")
                 if result.stderr.strip():
                     errors.append(result.stderr.strip()[:500])
-                if result.stdout.strip():
-                    errors.append(result.stdout.strip()[:500])
             
             return {
                 "success": result.returncode == 0,
@@ -476,13 +475,16 @@ class AnsibleValidator:
 # ============================================================================
 
 class YamlRouter:
-    """Unified Entry Point - YAMLlint + Typ-spezifische Validierung"""
+    """Unified Entry Point - YAMLlint + Typ-spezifische Validierung."""
     
     def __init__(self, verbose: bool = False, skip_ansible: bool = False,
-                 skip_yamllint: bool = False, yamllint_config: str = None):
+                 skip_yamllint: bool = False, yamllint_config: str = None,
+                 strict: bool = False, level: str = 'warning'):
         self.verbose = verbose
         self.skip_ansible = skip_ansible
         self.skip_yamllint = skip_yamllint
+        self.strict = strict
+        self.level = level
         self.yaml = YAML()
         self.yaml.preserve_quotes = True
         
@@ -493,19 +495,41 @@ class YamlRouter:
             )
         else:
             self.yamllint = None
+        
+        # Lazy-load Ansible Validator
+        self._ansible_validator = None
+    
+    @property
+    def ansible_validator(self):
+        """Lazy-load Ansible Validator."""
+        if self._ansible_validator is None:
+            self._ansible_validator = AnsibleValidator(verbose=self.verbose)
+        return self._ansible_validator
     
     def validate(self, filepath: str) -> dict:
-        """Hauptmethode: YAMLlint + Typ-spezifische Validierung"""
+        """Hauptmethode: YAMLlint + Typ-spezifische Validierung."""
         file_path = Path(filepath)
         
         if not file_path.exists():
-            return {"success": False, "errors": [f"File not found: {filepath}"]}
+            return {
+                "success": False,
+                "file": filepath,
+                "type": "unknown",
+                "errors": [f"File not found: {filepath}"],
+                "warnings": [],
+            }
         
         # Content lesen
         try:
             content = file_path.read_text(encoding='utf-8')
         except Exception as e:
-            return {"success": False, "errors": [f"Cannot read file: {e}"]}
+            return {
+                "success": False,
+                "file": filepath,
+                "type": "unknown",
+                "errors": [f"Cannot read file: {e}"],
+                "warnings": [],
+            }
         
         # ===== SCHRITT 1: YAMLlint (außer für Helm Templates) =====
         yamllint_result = {"errors": [], "warnings": []}
@@ -526,9 +550,11 @@ class YamlRouter:
             data = self.yaml.load(content)
         except Exception as e:
             if '{{' in content:
+                # Helm Template - kann nicht geparsed werden
                 data = {}
             else:
                 if not yamllint_result.get('errors'):
+                    yamllint_result['errors'] = yamllint_result.get('errors', [])
                     yamllint_result['errors'].append(f"YAML Parse Error: {e}")
         
         # ===== SCHRITT 3: Dateityp erkennen =====
@@ -563,21 +589,22 @@ class YamlRouter:
         }
     
     def _validate_helm(self, filepath: str) -> dict:
-        """Route zu validate_helm_template aus helm_validator.py"""
+        """Route zu validate_helm_template aus helm_validator.py."""
         try:
             exit_code = validate_helm_template(
                 input_file=filepath,
                 values_source=None,
                 yamllint_config=None,
                 force=True,
-                verbose=self.verbose
+                verbose=self.verbose,
+                strict=self.strict
             )
             
             return {
                 "success": exit_code == 0,
                 "file": filepath,
                 "type": "helm",
-                "errors": [] if exit_code == 0 else ["Helm validation failed (see output above)"],
+                "errors": [] if exit_code == 0 else ["Helm validation failed"],
                 "warnings": [],
             }
         except Exception as e:
@@ -589,40 +616,59 @@ class YamlRouter:
                 "warnings": [],
             }
     
-def _validate_k8s(self, filepath: str) -> dict:
-    """Route zu K8sValidator aus kubernetes_validator.py"""
-    try:
-        # FIX: Entferne verbose Parameter
-        validator = K8sValidator(strict=False, level='warning')
-        result = validator.validate_file(filepath)
+    def _validate_k8s(self, filepath: str) -> dict:
+        """Route zu KubernetesQuoteValidator aus kubernetes_validator.py."""
+        try:
+            # Erstelle Validator mit korrekten Parametern
+            validator = KubernetesQuoteValidator(
+                strict=self.strict,
+                level=self.level
+            )
+            result = validator.validate_file(filepath)
+            
+            # Konvertiere ValidationResult zu dict
+            errors = [
+                f"{filepath}:{issue.line_number}: {issue.message}"
+                for issue in result.issues 
+                if issue.severity == Severity.ERROR
+            ]
+            
+            warnings = [
+                f"{filepath}:{issue.line_number}: {issue.message}"
+                for issue in result.issues 
+                if issue.severity == Severity.WARNING
+            ]
+            
+            return {
+                "success": result.is_valid,
+                "file": filepath,
+                "type": "k8s",
+                "errors": errors,
+                "warnings": warnings,
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "file": filepath,
+                "type": "k8s",
+                "errors": [f"K8s validation error: {e}"],
+                "warnings": [],
+            }
+    
+    def _validate_ansible(self, filepath: str) -> dict:
+        """Route zu AnsibleValidator."""
+        if self.skip_ansible:
+            return {
+                "success": True,
+                "file": filepath,
+                "type": "ansible",
+                "skipped": True,
+                "message": "Ansible validation skipped (--skip-ansible)",
+                "errors": [],
+                "warnings": [],
+            }
         
-        errors = [
-            f"{filepath}:{issue.line_number}: {issue.message}"
-            for issue in result.issues 
-            if issue.severity.value == 'error'
-        ]
-        
-        warnings = [
-            f"{filepath}:{issue.line_number}: {issue.message}"
-            for issue in result.issues 
-            if issue.severity.value == 'warning'
-        ]
-        
-        return {
-            "success": result.is_valid,
-            "file": filepath,
-            "type": "k8s",
-            "errors": errors,
-            "warnings": warnings,
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "file": filepath,
-            "type": "k8s",
-            "errors": [f"K8s validation error: {e}"],
-            "warnings": [],
-        }
+        return self.ansible_validator.validate(filepath)
 
 
 # ============================================================================
@@ -641,6 +687,11 @@ def main():
                         help='Skip YAMLlint validation')
     parser.add_argument('--yamllint-config', type=str, default=None,
                         help='Path to custom yamllint config file')
+    parser.add_argument('--strict', action='store_true',
+                        help='Treat warnings as errors')
+    parser.add_argument('--level', choices=['error', 'warning', 'info'],
+                        default='warning',
+                        help='Minimum severity level to report (default: warning)')
     
     args = parser.parse_args()
     
@@ -649,6 +700,8 @@ def main():
         skip_ansible=args.skip_ansible,
         skip_yamllint=args.skip_yamllint,
         yamllint_config=args.yamllint_config,
+        strict=args.strict,
+        level=args.level,
     )
     
     exit_code = 0
@@ -669,8 +722,7 @@ def main():
         if result.get('errors'):
             exit_code = 1
             for err in result['errors']:
-                if 'see output above' not in err:
-                    print(f"   [ERROR] {err}")
+                print(f"   [ERROR] {err}")
         
         # Warnings
         if result.get('warnings'):
