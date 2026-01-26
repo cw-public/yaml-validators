@@ -589,48 +589,40 @@ class YamlRouter:
                 "warnings": [],
             }
     
-    def _validate_k8s(self, filepath: str) -> dict:
-        """Route zu K8sValidator aus kubernetes_validator.py"""
-        try:
-            validator = K8sValidator(verbose=self.verbose)
-            result = validator.validate(filepath)
-            result['type'] = 'k8s'
-            return result
-        except Exception as e:
-            return {
-                "success": False,
-                "file": filepath,
-                "type": "k8s",
-                "errors": [f"K8s validation error: {e}"],
-                "warnings": [],
-            }
-    
-    def _validate_ansible(self, filepath: str) -> dict:
-        """Route zu AnsibleValidator (WSL)"""
-        if self.skip_ansible:
-            if self.verbose:
-                print(f"   [SKIP] Ansible validation disabled")
-            return {
-                "success": True,
-                "file": filepath,
-                "type": "ansible",
-                "skipped": True,
-                "message": "Ansible validation skipped",
-                "errors": [],
-                "warnings": [],
-            }
+def _validate_k8s(self, filepath: str) -> dict:
+    """Route zu K8sValidator aus kubernetes_validator.py"""
+    try:
+        # FIX: Entferne verbose Parameter
+        validator = K8sValidator(strict=False, level='warning')
+        result = validator.validate_file(filepath)
         
-        try:
-            validator = AnsibleValidator(verbose=self.verbose)
-            return validator.validate(filepath)
-        except Exception as e:
-            return {
-                "success": False,
-                "file": filepath,
-                "type": "ansible",
-                "errors": [f"Ansible validation error: {e}"],
-                "warnings": [],
-            }
+        errors = [
+            f"{filepath}:{issue.line_number}: {issue.message}"
+            for issue in result.issues 
+            if issue.severity.value == 'error'
+        ]
+        
+        warnings = [
+            f"{filepath}:{issue.line_number}: {issue.message}"
+            for issue in result.issues 
+            if issue.severity.value == 'warning'
+        ]
+        
+        return {
+            "success": result.is_valid,
+            "file": filepath,
+            "type": "k8s",
+            "errors": errors,
+            "warnings": warnings,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "file": filepath,
+            "type": "k8s",
+            "errors": [f"K8s validation error: {e}"],
+            "warnings": [],
+        }
 
 
 # ============================================================================
