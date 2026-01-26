@@ -25,7 +25,7 @@ if sys.platform == 'win32':
 
 # Relative imports für Pre-Commit
 try:
-    from kubernetes_validator import K8sValidator
+    from kubernetes_validator import KubernetesQuoteValidator as K8sValidator
     from helm_validator import validate_helm_template
 except ImportError:
     import importlib.util
