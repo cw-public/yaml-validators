@@ -10,7 +10,6 @@ This validator ASSUMES the file is already identified as a K8s manifest.
 import re
 import sys
 from pathlib import Path
-from typing import List, Tuple
 
 
 # ============================================================================
@@ -70,12 +69,19 @@ class KubernetesQuoteValidator:
     def __init__(self, strict: bool = False, level: str = 'warning'):
         self.strict = strict
         self.level = Severity(level)
-        self.issues: List[QuoteIssue] = []
-        self.current_file: str = ""
-        self.lines: List[str] = []
+        self.issues = []
+        self.current_file = ""
+        self.lines = []
     
-    def validate_file(self, file_path: str) -> ValidationResult:
-        """Validate a YAML file for quoting rules."""
+    def validate_file(self, file_path: str):
+        """Validate a YAML file for quoting rules.
+        
+        Args:
+            file_path: Path to the YAML file to validate
+            
+        Returns:
+            ValidationResult: Result object with is_valid flag and list of issues
+        """
         self.issues = []
         self.current_file = file_path
         
@@ -86,7 +92,7 @@ class KubernetesQuoteValidator:
             print(f"Error reading file {file_path}: {e}", file=sys.stderr)
             return ValidationResult(file_path=file_path, is_valid=False)
         
-        context_stack: List[Tuple[int, str]] = []
+        context_stack = []
         in_annotations = False
         in_labels = False
         in_spec = False
@@ -154,7 +160,7 @@ class KubernetesQuoteValidator:
             infos=infos
         )
     
-    def _update_context(self, stack: List[Tuple[int, str]], indent: int, line: str) -> List[Tuple[int, str]]:
+    def _update_context(self, stack, indent: int, line: str):
         """Update context stack based on indentation."""
         stack = [(i, ctx) for i, ctx in stack if i < indent]
         
@@ -166,7 +172,7 @@ class KubernetesQuoteValidator:
         return stack
     
     def _validate_line(
-        self, line_num: int, line: str, stripped: str, context: List[str],
+        self, line_num: int, line: str, stripped: str, context,
         in_annotations: bool, in_labels: bool, in_spec: bool, in_template: bool,
         in_ports: bool, in_go_template_options: bool
     ):
@@ -219,7 +225,7 @@ class KubernetesQuoteValidator:
             self._check_port_string_quoted(line_num, line, key, value)
     
     def _validate_list_item(
-        self, line_num: int, line: str, stripped: str, context: List[str],
+        self, line_num: int, line: str, stripped: str, context,
         in_annotations: bool, in_ports: bool, in_go_template_options: bool
     ):
         """Validate list items."""
@@ -258,7 +264,7 @@ class KubernetesQuoteValidator:
                     Severity.WARNING
                 )
     
-    def _check_boolean_as_string(self, line_num: int, line: str, key: str, value: str, context: List[str]):
+    def _check_boolean_as_string(self, line_num: int, line: str, key: str, value: str, context):
         """Check if boolean is quoted as string (ERROR)."""
         if 'annotations' in context:
             return
@@ -295,7 +301,7 @@ class KubernetesQuoteValidator:
                 Severity.WARNING
             )
     
-    def _check_integer_field_quoted(self, line_num: int, line: str, key: str, value: str, context: List[str]):
+    def _check_integer_field_quoted(self, line_num: int, line: str, key: str, value: str, context):
         """Check if integer fields are quoted (ERROR)."""
         if 'annotations' in context:
             return
@@ -312,7 +318,7 @@ class KubernetesQuoteValidator:
                     Severity.ERROR
                 )
     
-    def _check_helm_template(self, line_num: int, line: str, key: str, value: str, context: List[str]):
+    def _check_helm_template(self, line_num: int, line: str, key: str, value: str, context):
         """Check Helm template quoting."""
         quoted = is_quoted(value)
         is_int_bool = is_int_bool_helm_template(value)
@@ -386,7 +392,7 @@ class KubernetesQuoteValidator:
                 Severity.WARNING
             )
     
-    def _check_path_url_quoted(self, line_num: int, line: str, key: str, value: str, context: List[str]):
+    def _check_path_url_quoted(self, line_num: int, line: str, key: str, value: str, context):
         """Check if paths/URLs are quoted (WARNING)."""
         if contains_helm_template(value):
             return
@@ -426,10 +432,20 @@ class KubernetesQuoteValidator:
             )
     
     def _add_issue(
-        self, line_num: int, line: str, issue_type: IssueType,
-        field_path: str, message: str, suggestion: str, severity: Severity
+        self, line_num: int, line: str, issue_type,
+        field_path: str, message: str, suggestion: str, severity
     ):
-        """Add an issue."""
+        """Add an issue.
+        
+        Args:
+            line_num: Line number where the issue was found
+            line: The actual line content
+            issue_type: Type of the issue (IssueType enum)
+            field_path: Path to the field with the issue
+            message: Human-readable message describing the issue
+            suggestion: Suggested fix
+            severity: Severity level (Severity enum)
+        """
         self.issues.append(QuoteIssue(
             line_number=line_num,
             line_content=line.rstrip(),

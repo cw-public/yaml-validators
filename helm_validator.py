@@ -11,7 +11,7 @@ import re
 import sys
 import os
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict
+from typing import Dict, Optional
 
 
 # ============================================================================
@@ -67,10 +67,18 @@ class HelmValidator:
     def __init__(self, type_map: Dict[str, str] = None, strict: bool = False):
         self.type_map = type_map or {}
         self.strict = strict
-        self.errors: List[ValidationError] = []
+        self.errors = []
     
-    def validate_content(self, content: str, filepath: str = "<string>") -> Tuple[bool, List[ValidationError]]:
-        """Validate Helm template content."""
+    def validate_content(self, content: str, filepath: str = "<string>"):
+        """Validate Helm template content.
+        
+        Args:
+            content: The Helm template content to validate
+            filepath: Optional filepath for error messages
+            
+        Returns:
+            Tuple of (is_valid: bool, errors: list of ValidationError)
+        """
         self.errors = []
         lines = content.split('\n')
         
@@ -83,8 +91,15 @@ class HelmValidator:
         
         return is_valid, self.errors
     
-    def validate_file(self, filepath: str) -> Tuple[bool, List[ValidationError]]:
-        """Validate a Helm template file."""
+    def validate_file(self, filepath: str):
+        """Validate a Helm template file.
+        
+        Args:
+            filepath: Path to the Helm template file
+            
+        Returns:
+            Tuple of (is_valid: bool, errors: list of ValidationError)
+        """
         try:
             content = Path(filepath).read_text(encoding='utf-8')
             return self.validate_content(content, filepath)
