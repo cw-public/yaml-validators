@@ -5,6 +5,9 @@ YAML Router - Unified Entry Point for YAML Validation
 - YAMLlint for all files (except Helm Templates)
 - Auto-detects: Helm Charts, K8s Manifests, Ansible Playbooks
 - Routes to appropriate validator
+
+This is the SINGLE source of truth for file type detection.
+Validators should NOT contain detection logic.
 """
 
 import re
@@ -18,6 +21,13 @@ from ruamel.yaml import YAML
 # YAMLlint Import
 from yamllint import linter
 from yamllint.config import YamlLintConfig
+
+# Shared Constants
+from shared_constants import (
+    Severity, ValidationResult,
+    HELM_DETECTION_PATTERNS, ANSIBLE_KEYWORDS, ANSIBLE_MODULES, ANSIBLE_DIRECTORIES,
+    is_helm_template_content,
+)
 
 # Force UTF-8 encoding on Windows
 if sys.platform == 'win32':
@@ -34,8 +44,11 @@ TERMINAL_WIDTH = 80
 class Colors:
     """ANSI color codes for terminal output."""
     
+    # Force colors in pre-commit
+    FORCE_COLOR = os.environ.get('FORCE_COLOR') is not None or os.environ.get('PRE_COMMIT') is not None
+    
     # Check if colors are supported
-    ENABLED = sys.stdout.isatty() and os.environ.get('NO_COLOR') is None
+    ENABLED = FORCE_COLOR or (sys.stdout.isatty() and os.environ.get('NO_COLOR') is None)
     
     # Colors
     RED = '\033[91m' if ENABLED else ''
@@ -65,6 +78,30 @@ class Colors:
     @classmethod
     def bold(cls, text: str) -> str:
         return f"{cls.BOLD}{text}{cls.RESET}"
+    
+    @classmethod
+    def enable(cls):
+        """Force enable colors."""
+        cls.ENABLED = True
+        cls.RED = '\033[91m'
+        cls.YELLOW = '\033[93m'
+        cls.GREEN = '\033[92m'
+        cls.CYAN = '\033[96m'
+        cls.WHITE = '\033[97m'
+        cls.BOLD = '\033[1m'
+        cls.RESET = '\033[0m'
+    
+    @classmethod
+    def disable(cls):
+        """Force disable colors."""
+        cls.ENABLED = False
+        cls.RED = ''
+        cls.YELLOW = ''
+        cls.GREEN = ''
+        cls.CYAN = ''
+        cls.WHITE = ''
+        cls.BOLD = ''
+        cls.RESET = ''
 
 
 # ============================================================================
@@ -72,8 +109,8 @@ class Colors:
 # ============================================================================
 
 try:
-    from kubernetes_validator import KubernetesQuoteValidator, Severity, ValidationResult
-    from helm_validator import HelmValidator, validate_helm_template
+    from kubernetes_validator import KubernetesQuoteValidator
+    from helm_validator import HelmValidator
 except ImportError:
     import importlib.util
     
@@ -85,8 +122,6 @@ except ImportError:
     kubernetes_validator = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(kubernetes_validator)
     KubernetesQuoteValidator = kubernetes_validator.KubernetesQuoteValidator
-    Severity = kubernetes_validator.Severity
-    ValidationResult = kubernetes_validator.ValidationResult
     
     # helm_validator
     spec = importlib.util.spec_from_file_location(
@@ -96,7 +131,6 @@ except ImportError:
     helm_validator = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helm_validator)
     HelmValidator = helm_validator.HelmValidator
-    validate_helm_template = helm_validator.validate_helm_template
 
 
 # ============================================================================
@@ -139,9 +173,9 @@ class OutputFormatter:
         """
         # Format severity with color
         if severity.upper() == "ERROR":
-            severity_str = Colors.red(f"[ERROR]")
+            severity_str = Colors.red("[ERROR]")
         elif severity.upper() == "WARNING":
-            severity_str = Colors.yellow(f"[WARNING]")
+            severity_str = Colors.yellow("[WARNING]")
         else:
             severity_str = f"[{severity.upper()}]"
         
@@ -152,8 +186,9 @@ class OutputFormatter:
             print(f"{severity_str} Line {line_num}: {message}")
         
         # CURRENT / EXPECTED
-        print(f"   CURRENT:  {current.strip()}")
-        print(f"   EXPECTED: {suggestion.strip()}")
+        if current and suggestion:
+            print(f"   CURRENT:  {current.strip()}")
+            print(f"   EXPECTED: {suggestion.strip()}")
         
         # Blank line for separation
         print()
@@ -166,7 +201,7 @@ class OutputFormatter:
         else:
             severity_str = Colors.yellow("[WARNING]")
         
-        print(f"{severity_str} Line {line}, Column {column}: {message}")
+        print(f"{severity_str} Line {line}, Column {column}: {message} ({rule})")
         print(f"   Rule: {rule}")
         print()
     
@@ -266,8 +301,7 @@ rules:
         if content is None:
             if not file_path.exists():
                 return {
-                    "success": False,
-                    "file": filepath,
+                    "success": False, "file": filepath,
                     "errors": [{"line": 0, "column": 0, "rule": "file", "message": f"File not found: {filepath}", "level": "error"}],
                     "warnings": [],
                 }
@@ -276,8 +310,7 @@ rules:
                 content = file_path.read_text(encoding='utf-8')
             except Exception as e:
                 return {
-                    "success": False,
-                    "file": filepath,
+                    "success": False, "file": filepath,
                     "errors": [{"line": 0, "column": 0, "rule": "file", "message": f"Cannot read file: {e}", "level": "error"}],
                     "warnings": [],
                 }
@@ -308,68 +341,40 @@ rules:
                 
                 for issue in errors + warnings:
                     formatter.print_yamllint_issue(
-                        filepath,
-                        issue["line"],
-                        issue["column"],
-                        issue["rule"],
-                        issue["message"],
-                        issue["level"]
+                        filepath, issue["line"], issue["column"],
+                        issue["rule"], issue["message"], issue["level"]
                     )
             
-            return {
-                "success": len(errors) == 0,
-                "file": filepath,
-                "errors": errors,
-                "warnings": warnings,
-            }
+            return {"success": len(errors) == 0, "file": filepath, "errors": errors, "warnings": warnings}
             
         except Exception as e:
             return {
-                "success": False,
-                "file": filepath,
+                "success": False, "file": filepath,
                 "errors": [{"line": 0, "column": 0, "rule": "exception", "message": str(e), "level": "error"}],
                 "warnings": [],
             }
 
 
 # ============================================================================
-# DETECTION LOGIC
+# FILE TYPE DETECTION (SINGLE SOURCE OF TRUTH)
 # ============================================================================
 
 class FileTypeDetector:
-    """Detects file type: Helm Template, K8s Manifest, Ansible, or Generic YAML."""
+    """
+    Detects file type: Helm Template, K8s Manifest, Ansible, or Generic YAML.
     
-    HELM_PATTERNS = [
-        r'\{\{\s*\.Values\.',
-        r'\{\{\s*\.Release\.',
-        r'\{\{\s*\.Chart\.',
-        r'\{\{\s*\.Capabilities\.',
-        r'\{\{-?\s*if\s',
-        r'\{\{-?\s*range\s',
-        r'\{\{-?\s*include\s',
-        r'\{\{-?\s*define\s',
-    ]
+    THIS IS THE SINGLE SOURCE OF TRUTH FOR FILE TYPE DETECTION.
+    Validators should NOT contain their own detection logic.
+    """
     
-    ANSIBLE_KEYWORDS = [
-        'hosts', 'tasks', 'roles', 'handlers', 'vars', 'become',
-        'gather_facts', 'pre_tasks', 'post_tasks', 'block', 'rescue', 'always',
-    ]
-    
-    ANSIBLE_MODULES = [
-        'uri', 'debug', 'shell', 'command', 'copy', 'file',
-        'template', 'apt', 'yum', 'pip', 'git', 'service',
-        'systemd', 'set_fact', 'include', 'include_tasks',
-        'import_tasks', 'include_role', 'import_role',
-        'ansible.builtin.', 'community.', 'amazon.aws.',
-    ]
-    
-    @staticmethod
-    def is_helm_template(content: str, file_path: Path) -> bool:
+    @classmethod
+    def is_helm_template(cls, content: str, file_path: Path) -> bool:
         """Check if file is a Helm template."""
-        for pattern in FileTypeDetector.HELM_PATTERNS:
-            if re.search(pattern, content):
-                return True
+        # Use shared function
+        if is_helm_template_content(content):
+            return True
         
+        # Check path structure
         path_str = str(file_path).replace('\\', '/')
         if '/templates/' in path_str:
             current = file_path.parent
@@ -380,20 +385,18 @@ class FileTypeDetector:
         
         return False
     
-    @staticmethod
-    def is_k8s_manifest(data: dict) -> bool:
+    @classmethod
+    def is_k8s_manifest(cls, data: dict) -> bool:
         """Check if file is a Kubernetes manifest."""
         if not isinstance(data, dict):
             return False
         return 'apiVersion' in data and 'kind' in data
     
-    @staticmethod
-    def is_ansible_file(data, file_path: Path) -> bool:
+    @classmethod
+    def is_ansible_file(cls, data, file_path: Path) -> bool:
         """Check if file is an Ansible playbook/role/task."""
         path_str = str(file_path).replace('\\', '/').lower()
-        ansible_dirs = ['/playbooks/', '/roles/', '/tasks/', '/handlers/', 
-                       '/vars/', '/defaults/', '/group_vars/', '/host_vars/']
-        in_ansible_dir = any(d in path_str for d in ansible_dirs)
+        in_ansible_dir = any(d in path_str for d in ANSIBLE_DIRECTORIES)
         
         filename_lower = file_path.name.lower()
         
@@ -404,12 +407,12 @@ class FileTypeDetector:
                     return True
                 
                 if 'name' in first_item:
-                    for module in FileTypeDetector.ANSIBLE_MODULES:
+                    for module in ANSIBLE_MODULES:
                         if module in first_item:
                             return True
         
         if isinstance(data, dict):
-            ansible_keys = set(data.keys()) & set(FileTypeDetector.ANSIBLE_KEYWORDS)
+            ansible_keys = set(data.keys()) & set(ANSIBLE_KEYWORDS)
             if len(ansible_keys) >= 2:
                 return True
         
@@ -422,19 +425,119 @@ class FileTypeDetector:
         
         return False
     
-    @staticmethod
-    def detect(file_path: Path, content: str, data) -> str:
-        """Detect file type."""
-        if FileTypeDetector.is_helm_template(content, file_path):
+    @classmethod
+    def detect(cls, file_path: Path, content: str, data) -> str:
+        """Detect file type. Returns: 'helm', 'k8s', 'ansible', or 'generic'"""
+        if cls.is_helm_template(content, file_path):
             return 'helm'
         
-        if isinstance(data, dict) and FileTypeDetector.is_k8s_manifest(data):
+        if isinstance(data, dict) and cls.is_k8s_manifest(data):
             return 'k8s'
         
-        if FileTypeDetector.is_ansible_file(data, file_path):
+        if cls.is_ansible_file(data, file_path):
             return 'ansible'
         
         return 'generic'
+    
+    @classmethod
+    def find_helm_structure(cls, file_path: Path) -> tuple:
+        """Find Helm chart structure. Returns: (chart_yaml_path, values_source) or (None, None)"""
+        current = file_path.parent
+        
+        for _ in range(10):
+            chart_yaml = current / 'Chart.yaml'
+            if chart_yaml.exists():
+                values_dir = current / 'values'
+                values_file = current / 'values.yaml'
+                
+                if values_dir.exists() and values_dir.is_dir():
+                    return (chart_yaml, values_dir)
+                elif values_file.exists():
+                    return (chart_yaml, values_file)
+                else:
+                    return (chart_yaml, None)
+            
+            if current.parent == current:
+                break
+            current = current.parent
+        
+        return (None, None)
+
+
+# ============================================================================
+# HELM VALUES LOADER
+# ============================================================================
+
+class HelmValuesLoader:
+    """Loads Helm values and extracts type information."""
+    
+    def __init__(self):
+        self.yaml = YAML()
+        self.yaml.preserve_quotes = True
+    
+    def load_type_map(self, values_source: Path) -> dict:
+        """
+        Load values and extract type map.
+        
+        Args:
+            values_source: Path to values.yaml or values/ directory
+            
+        Returns:
+            dict: Mapping of value paths to types (e.g., {"replicas": "int", "name": "string"})
+        """
+        type_map = {}
+        
+        if values_source is None:
+            return type_map
+        
+        if values_source.is_file():
+            type_map = self._extract_types_from_file(values_source)
+        elif values_source.is_dir():
+            for yaml_file in values_source.glob('*.yaml'):
+                type_map.update(self._extract_types_from_file(yaml_file))
+            for yml_file in values_source.glob('*.yml'):
+                type_map.update(self._extract_types_from_file(yml_file))
+        
+        return type_map
+    
+    def _extract_types_from_file(self, filepath: Path) -> dict:
+        """Extract type information from a single values file."""
+        type_map = {}
+        
+        try:
+            content = filepath.read_text(encoding='utf-8')
+            data = self.yaml.load(content)
+            
+            if isinstance(data, dict):
+                self._extract_types_recursive(data, "", type_map)
+        except Exception:
+            pass
+        
+        return type_map
+    
+    def _extract_types_recursive(self, data: dict, prefix: str, type_map: dict):
+        """Recursively extract types from nested dict."""
+        for key, value in data.items():
+            full_key = f"{prefix}.{key}" if prefix else key
+            
+            if isinstance(value, bool):
+                type_map[full_key] = "bool"
+                type_map[key] = "bool"
+            elif isinstance(value, int):
+                type_map[full_key] = "int"
+                type_map[key] = "int"
+            elif isinstance(value, float):
+                type_map[full_key] = "float"
+                type_map[key] = "float"
+            elif isinstance(value, str):
+                type_map[full_key] = "string"
+                type_map[key] = "string"
+            elif isinstance(value, dict):
+                type_map[full_key] = "dict"
+                self._extract_types_recursive(value, full_key, type_map)
+            elif isinstance(value, list):
+                type_map[full_key] = "list"
+                type_map[key] = "list"
 
 
 # ============================================================================
@@ -487,30 +590,19 @@ class AnsibleValidator:
             if print_output:
                 formatter.print_section_header("Ansible-Lint")
                 formatter.print_skip_message("WSL not available - skipping ansible-lint")
-            return {
-                "success": True, "file": filepath, "type": "ansible",
-                "skipped": True, "message": "WSL not available",
-                "errors": [], "warnings": [],
-            }
+            return {"success": True, "file": filepath, "type": "ansible", "skipped": True, "errors": [], "warnings": []}
         
         if not self.ansible_lint_cmd:
             if print_output:
                 formatter.print_section_header("Ansible-Lint")
-                formatter.print_skip_message("ansible-lint not found in WSL - run 'pip install ansible-lint' in WSL")
-            return {
-                "success": True, "file": filepath, "type": "ansible",
-                "skipped": True, "message": "ansible-lint not found",
-                "errors": [], "warnings": [],
-            }
+                formatter.print_skip_message("ansible-lint not found in WSL")
+            return {"success": True, "file": filepath, "type": "ansible", "skipped": True, "errors": [], "warnings": []}
         
         wsl_path = self._windows_to_wsl_path(filepath)
         
         try:
             cmd = f'{self.ansible_lint_cmd} -p --nocolor "{wsl_path}"'
-            result = subprocess.run(
-                ['wsl', 'bash', '-l', '-c', cmd],
-                capture_output=True, text=True, timeout=120
-            )
+            result = subprocess.run(['wsl', 'bash', '-l', '-c', cmd], capture_output=True, text=True, timeout=120)
             
             errors = []
             warnings = []
@@ -524,46 +616,30 @@ class AnsibleValidator:
                 if not line or ':' not in line:
                     continue
                 
-                # Parse: file:line:column: message
                 match = re.match(r'.*?:(\d+):(\d*):?\s*(.*)', line)
                 if match:
                     line_num = int(match.group(1))
                     col = int(match.group(2)) if match.group(2) else 0
                     msg = match.group(3)
                     
-                    issue = {"line": line_num, "column": col, "message": msg, "raw": line}
-                    
+                    issue = {"line": line_num, "column": col, "message": msg}
                     is_error = any(x in line.lower() for x in ['error', 'fatal', 'syntax-check'])
                     
                     if is_error:
                         errors.append(issue)
                         if print_output:
-                            print(f"{Colors.red('[ERROR]')} Line {line_num}, Column {col}: {msg}")
-                            print()
+                            print(f"{Colors.red('[ERROR]')} Line {line_num}, Column {col}: {msg}\n")
                     else:
                         warnings.append(issue)
                         if print_output:
-                            print(f"{Colors.yellow('[WARNING]')} Line {line_num}, Column {col}: {msg}")
-                            print()
+                            print(f"{Colors.yellow('[WARNING]')} Line {line_num}, Column {col}: {msg}\n")
             
-            return {
-                "success": result.returncode == 0,
-                "file": filepath, "type": "ansible",
-                "errors": errors, "warnings": warnings,
-            }
+            return {"success": result.returncode == 0, "file": filepath, "type": "ansible", "errors": errors, "warnings": warnings}
             
         except subprocess.TimeoutExpired:
-            return {
-                "success": False, "file": filepath, "type": "ansible",
-                "errors": [{"line": 0, "column": 0, "message": "ansible-lint timeout (120s)"}],
-                "warnings": [],
-            }
+            return {"success": False, "file": filepath, "errors": [{"line": 0, "column": 0, "message": "ansible-lint timeout"}], "warnings": []}
         except Exception as e:
-            return {
-                "success": False, "file": filepath, "type": "ansible",
-                "errors": [{"line": 0, "column": 0, "message": str(e)}],
-                "warnings": [],
-            }
+            return {"success": False, "file": filepath, "errors": [{"line": 0, "column": 0, "message": str(e)}], "warnings": []}
 
 
 # ============================================================================
@@ -571,7 +647,18 @@ class AnsibleValidator:
 # ============================================================================
 
 class YamlRouter:
-    """Unified Entry Point - YAMLlint + type-specific validation."""
+    """
+    Unified Entry Point - YAMLlint + type-specific validation.
+    
+    This class is responsible for:
+    1. File type detection (via FileTypeDetector)
+    2. Loading Helm values (via HelmValuesLoader)
+    3. Routing to appropriate validator
+    4. Formatting output
+    
+    Validators (HelmValidator, KubernetesQuoteValidator, AnsibleValidator)
+    should NOT contain detection logic - they only validate.
+    """
     
     def __init__(self, verbose: bool = False, skip_ansible: bool = False,
                  skip_yamllint: bool = False, yamllint_config: str = None,
@@ -581,10 +668,14 @@ class YamlRouter:
         self.skip_yamllint = skip_yamllint
         self.strict = strict
         self.level = level
+        
+        # YAML parser
         self.yaml = YAML()
         self.yaml.preserve_quotes = True
         
+        # Sub-components
         self.yamllint = None if skip_yamllint else YamlLintValidator(config_file=yamllint_config, verbose=verbose)
+        self.values_loader = HelmValuesLoader()
         self._ansible_validator = None
     
     @property
@@ -595,25 +686,26 @@ class YamlRouter:
         return self._ansible_validator
     
     def validate(self, filepath: str) -> dict:
-        """Main method: YAMLlint + type-specific validation."""
+        """
+        Main validation method.
+        
+        1. Detect file type
+        2. Run YAMLlint (except for Helm)
+        3. Run type-specific validation
+        4. Format and print output
+        """
         file_path = Path(filepath)
         
         if not file_path.exists():
-            return {
-                "success": False, "file": filepath, "type": "unknown",
-                "errors": [{"line": 0, "column": 0, "message": f"File not found: {filepath}"}],
-                "warnings": [],
-            }
+            return {"success": False, "file": filepath, "type": "unknown",
+                    "errors": [{"line": 0, "column": 0, "message": f"File not found: {filepath}"}], "warnings": []}
         
         # Read content
         try:
             content = file_path.read_text(encoding='utf-8')
         except Exception as e:
-            return {
-                "success": False, "file": filepath, "type": "unknown",
-                "errors": [{"line": 0, "column": 0, "message": f"Cannot read file: {e}"}],
-                "warnings": [],
-            }
+            return {"success": False, "file": filepath, "type": "unknown",
+                    "errors": [{"line": 0, "column": 0, "message": f"Cannot read file: {e}"}], "warnings": []}
         
         # Detect file type (before YAML parse for Helm)
         is_helm = FileTypeDetector.is_helm_template(content, file_path)
@@ -636,13 +728,9 @@ class YamlRouter:
         
         # Print parse error
         if parse_error:
-            print(f"{Colors.red('[ERROR]')} YAML Parse Error: {parse_error}")
-            print()
-            return {
-                "success": False, "file": filepath, "type": file_type,
-                "errors": [{"line": 0, "column": 0, "message": f"YAML Parse Error: {parse_error}"}],
-                "warnings": [],
-            }
+            print(f"{Colors.red('[ERROR]')} YAML Parse Error: {parse_error}\n")
+            return {"success": False, "file": filepath, "type": file_type,
+                    "errors": [{"line": 0, "column": 0, "message": f"YAML Parse Error: {parse_error}"}], "warnings": []}
         
         total_errors = []
         total_warnings = []
@@ -659,7 +747,7 @@ class YamlRouter:
         
         # ===== STEP 2: Type-specific validation =====
         if file_type == 'helm':
-            type_result = self._validate_helm(filepath, content)
+            type_result = self._validate_helm(filepath, content, file_path)
         elif file_type == 'k8s':
             type_result = self._validate_k8s(filepath)
         elif file_type == 'ansible':
@@ -673,22 +761,27 @@ class YamlRouter:
         # Summary
         formatter.print_summary(len(total_errors), len(total_warnings))
         
-        return {
-            "success": len(total_errors) == 0,
-            "file": filepath,
-            "type": file_type,
-            "errors": total_errors,
-            "warnings": total_warnings,
-            "skipped": type_result.get('skipped', False),
-        }
+        return {"success": len(total_errors) == 0, "file": filepath, "type": file_type,
+                "errors": total_errors, "warnings": total_warnings, "skipped": type_result.get('skipped', False)}
     
-    def _validate_helm(self, filepath: str, content: str) -> dict:
+    def _validate_helm(self, filepath: str, content: str, file_path: Path) -> dict:
         """Validate Helm template with formatted output."""
         formatter.print_section_header("Helm Template Validator")
         
         try:
-            validator = HelmValidator(type_map={}, strict=self.strict)
-            is_valid, errors = validator.validate_file(filepath)
+            # Find Helm structure and load values (Router's responsibility)
+            chart_yaml, values_source = FileTypeDetector.find_helm_structure(file_path)
+            
+            # Load type map from values
+            type_map = {}
+            if values_source:
+                type_map = self.values_loader.load_type_map(values_source)
+                if self.verbose:
+                    print(f"   Loaded {len(type_map)} type mappings from values")
+            
+            # Create validator with type map (no detection logic in validator)
+            validator = HelmValidator(type_map=type_map, strict=self.strict)
+            is_valid, errors = validator.validate_content(content, filepath)
             
             error_list = []
             warning_list = []
@@ -730,8 +823,7 @@ class YamlRouter:
             }
             
         except Exception as e:
-            print(f"{Colors.red('[ERROR]')} Helm validation error: {e}")
-            print()
+            print(f"{Colors.red('[ERROR]')} Helm validation error: {e}\n")
             return {
                 "success": False,
                 "file": filepath,
@@ -788,8 +880,7 @@ class YamlRouter:
             }
             
         except Exception as e:
-            print(f"{Colors.red('[ERROR]')} K8s validation error: {e}")
-            print()
+            print(f"{Colors.red('[ERROR]')} K8s validation error: {e}\n")
             return {
                 "success": False,
                 "file": filepath,
@@ -803,10 +894,7 @@ class YamlRouter:
         if self.skip_ansible:
             formatter.print_section_header("Ansible-Lint")
             formatter.print_skip_message("Ansible validation skipped (--skip-ansible)")
-            return {
-                "success": True, "file": filepath, "type": "ansible",
-                "skipped": True, "errors": [], "warnings": [],
-            }
+            return {"success": True, "file": filepath, "type": "ansible", "skipped": True, "errors": [], "warnings": []}
         
         return self.ansible_validator.validate(filepath, print_output=True)
 
@@ -816,31 +904,24 @@ class YamlRouter:
 # ============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='YAML Router - Helm, K8s, Ansible Validator with YAMLlint'
-    )
+    parser = argparse.ArgumentParser(description='YAML Router - Helm, K8s, Ansible Validator with YAMLlint')
     parser.add_argument('files', nargs='+', help='YAML files to validate')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
     parser.add_argument('--skip-ansible', action='store_true', help='Skip Ansible validation')
     parser.add_argument('--skip-yamllint', action='store_true', help='Skip YAMLlint validation')
     parser.add_argument('--yamllint-config', type=str, default=None, help='Path to yamllint config')
     parser.add_argument('--strict', action='store_true', help='Treat warnings as errors')
-    parser.add_argument('--level', choices=['error', 'warning', 'info'], default='warning',
-                        help='Minimum severity level (default: warning)')
+    parser.add_argument('--level', choices=['error', 'warning', 'info'], default='warning', help='Minimum severity level')
     parser.add_argument('--no-color', action='store_true', help='Disable colored output')
+    parser.add_argument('--force-color', action='store_true', help='Force colored output')
     
     args = parser.parse_args()
     
-    # Disable colors if requested
-    if args.no_color:
-        Colors.ENABLED = False
-        Colors.RED = ''
-        Colors.YELLOW = ''
-        Colors.GREEN = ''
-        Colors.CYAN = ''
-        Colors.WHITE = ''
-        Colors.BOLD = ''
-        Colors.RESET = ''
+    # Handle colors
+    if args.force_color:
+        Colors.enable()
+    elif args.no_color:
+        Colors.disable()
     
     router = YamlRouter(
         verbose=args.verbose,
@@ -868,14 +949,8 @@ def main():
     if len(args.files) > 1:
         print(f"\n{'=' * TERMINAL_WIDTH}")
         summary_parts = [f"{len(args.files)} file(s)"]
-        if total_errors > 0:
-            summary_parts.append(Colors.red(f"{total_errors} error(s)"))
-        else:
-            summary_parts.append(f"{total_errors} error(s)")
-        if total_warnings > 0:
-            summary_parts.append(Colors.yellow(f"{total_warnings} warning(s)"))
-        else:
-            summary_parts.append(f"{total_warnings} warning(s)")
+        summary_parts.append(Colors.red(f"{total_errors} error(s)") if total_errors > 0 else f"{total_errors} error(s)")
+        summary_parts.append(Colors.yellow(f"{total_warnings} warning(s)") if total_warnings > 0 else f"{total_warnings} warning(s)")
         print(f"TOTAL: {', '.join(summary_parts)}")
         print(f"{'=' * TERMINAL_WIDTH}")
     
