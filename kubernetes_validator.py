@@ -5,18 +5,6 @@ Kubernetes Manifest Validator - Quote Rules
 This validator does NOT contain file type detection logic.
 Detection is handled by yaml_router.py (FileTypeDetector).
 This validator ASSUMES the file is already identified as a K8s manifest.
-
-Rules (ERROR Level - Breaking):
-1. Boolean as string: enabled: "true" -> ERROR
-2. Helm Template Integer quoted: "{{ .replicas }}" -> ERROR
-3. Annotation Integer without quote: sync-wave: 1 -> ERROR
-4. goTemplateOptions without quote: [missingkey=error] -> ERROR
-
-Rules (WARNING Level - Idiomatic):
-5. Top-Level quoted: apiVersion: "v1" -> WARNING
-6. Metadata name/namespace quoted -> WARNING
-7. Paths/URLs without quote -> WARNING
-8. Port name/protocol without quote -> WARNING
 """
 
 import re
@@ -24,15 +12,52 @@ import sys
 from pathlib import Path
 from typing import List, Tuple
 
-# Import from shared constants
-from shared_constants import (
-    Severity, IssueType, QuoteIssue, ValidationResult,
-    K8S_TOP_LEVEL_NO_QUOTE, K8S_METADATA_NO_QUOTE, K8S_INTEGER_FIELDS,
-    K8S_PORT_STRING_FIELDS, K8S_STRING_FIELDS_REQUIRE_QUOTE,
-    K8S_ANNOTATION_NUMERIC_KEYS, K8S_CONTEXT_KEYS,
-    HELM_INT_BOOL_PATTERNS,
-    is_quoted, contains_helm_template, is_int_bool_helm_template, looks_like_integer,
-)
+
+# ============================================================================
+# RELATIVE IMPORTS FOR PRE-COMMIT COMPATIBILITY
+# ============================================================================
+
+def _import_shared_constants():
+    """Import shared_constants with fallback for different installation methods."""
+    try:
+        from shared_constants import (
+            Severity, IssueType, QuoteIssue, ValidationResult,
+            K8S_TOP_LEVEL_NO_QUOTE, K8S_METADATA_NO_QUOTE, K8S_INTEGER_FIELDS,
+            K8S_PORT_STRING_FIELDS, K8S_STRING_FIELDS_REQUIRE_QUOTE,
+            K8S_ANNOTATION_NUMERIC_KEYS, K8S_CONTEXT_KEYS,
+            HELM_INT_BOOL_PATTERNS,
+            is_quoted, contains_helm_template, is_int_bool_helm_template, looks_like_integer,
+        )
+        return (Severity, IssueType, QuoteIssue, ValidationResult,
+                K8S_TOP_LEVEL_NO_QUOTE, K8S_METADATA_NO_QUOTE, K8S_INTEGER_FIELDS,
+                K8S_PORT_STRING_FIELDS, K8S_STRING_FIELDS_REQUIRE_QUOTE,
+                K8S_ANNOTATION_NUMERIC_KEYS, K8S_CONTEXT_KEYS,
+                HELM_INT_BOOL_PATTERNS,
+                is_quoted, contains_helm_template, is_int_bool_helm_template, looks_like_integer)
+    except ImportError:
+        pass
+    
+    # Fallback: Load from same directory
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "shared_constants",
+        Path(__file__).parent / "shared_constants.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return (module.Severity, module.IssueType, module.QuoteIssue, module.ValidationResult,
+            module.K8S_TOP_LEVEL_NO_QUOTE, module.K8S_METADATA_NO_QUOTE, module.K8S_INTEGER_FIELDS,
+            module.K8S_PORT_STRING_FIELDS, module.K8S_STRING_FIELDS_REQUIRE_QUOTE,
+            module.K8S_ANNOTATION_NUMERIC_KEYS, module.K8S_CONTEXT_KEYS,
+            module.HELM_INT_BOOL_PATTERNS,
+            module.is_quoted, module.contains_helm_template, module.is_int_bool_helm_template, module.looks_like_integer)
+
+(Severity, IssueType, QuoteIssue, ValidationResult,
+ K8S_TOP_LEVEL_NO_QUOTE, K8S_METADATA_NO_QUOTE, K8S_INTEGER_FIELDS,
+ K8S_PORT_STRING_FIELDS, K8S_STRING_FIELDS_REQUIRE_QUOTE,
+ K8S_ANNOTATION_NUMERIC_KEYS, K8S_CONTEXT_KEYS,
+ HELM_INT_BOOL_PATTERNS,
+ is_quoted, contains_helm_template, is_int_bool_helm_template, looks_like_integer) = _import_shared_constants()
 
 
 # ============================================================================
@@ -40,20 +65,9 @@ from shared_constants import (
 # ============================================================================
 
 class KubernetesQuoteValidator:
-    """
-    Validator for Kubernetes manifest quoting rules.
-    
-    IMPORTANT: This class does NOT detect if a file is a K8s manifest.
-    Detection is handled by yaml_router.py. This class ASSUMES the input
-    is already a Kubernetes manifest.
-    """
+    """Validator for Kubernetes manifest quoting rules."""
     
     def __init__(self, strict: bool = False, level: str = 'warning'):
-        """
-        Args:
-            strict: If True, treat warnings as errors
-            level: Minimum severity level ('error', 'warning', 'info')
-        """
         self.strict = strict
         self.level = Severity(level)
         self.issues: List[QuoteIssue] = []
@@ -178,7 +192,6 @@ class KubernetesQuoteValidator:
         if not value:
             return
         
-        # ERROR Level Checks
         self._check_boolean_as_string(line_num, line, key, value, context)
         
         if in_annotations:
@@ -193,7 +206,6 @@ class KubernetesQuoteValidator:
         if key == 'goTemplateOptions':
             self._check_go_template_options(line_num, line, value)
         
-        # WARNING Level Checks
         if not context and key in K8S_TOP_LEVEL_NO_QUOTE:
             self._check_top_level_quoted(line_num, line, key, value)
         
@@ -246,8 +258,6 @@ class KubernetesQuoteValidator:
                     Severity.WARNING
                 )
     
-    # ========== ERROR Level Checks ==========
-    
     def _check_boolean_as_string(self, line_num: int, line: str, key: str, value: str, context: List[str]):
         """Check if boolean is quoted as string (ERROR)."""
         if 'annotations' in context:
@@ -264,8 +274,7 @@ class KubernetesQuoteValidator:
             )
     
     def _check_annotation_value(self, line_num: int, line: str, key: str, value: str):
-        """Check annotation values (ERROR for integer, WARNING for special chars)."""
-        
+        """Check annotation values."""
         if looks_like_integer(value) and not is_quoted(value):
             self._add_issue(
                 line_num, line,
@@ -350,8 +359,6 @@ class KubernetesQuoteValidator:
                     Severity.ERROR
                 )
     
-    # ========== WARNING Level Checks ==========
-    
     def _check_top_level_quoted(self, line_num: int, line: str, key: str, value: str):
         """Check if top-level fields are quoted (WARNING)."""
         if is_quoted(value):
@@ -418,8 +425,6 @@ class KubernetesQuoteValidator:
                 Severity.WARNING
             )
     
-    # ========== Helper Methods ==========
-    
     def _add_issue(
         self, line_num: int, line: str, issue_type: IssueType,
         field_path: str, message: str, suggestion: str, severity: Severity
@@ -437,11 +442,11 @@ class KubernetesQuoteValidator:
 
 
 # ============================================================================
-# Main Function (for standalone use)
+# Main Function
 # ============================================================================
 
 def main():
-    """Main function for CLI (standalone use)."""
+    """Main function for CLI."""
     import argparse
     
     parser = argparse.ArgumentParser(description='Kubernetes Quote Validator')

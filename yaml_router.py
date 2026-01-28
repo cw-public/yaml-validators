@@ -22,13 +22,6 @@ from ruamel.yaml import YAML
 from yamllint import linter
 from yamllint.config import YamlLintConfig
 
-# Shared Constants
-from shared_constants import (
-    Severity, ValidationResult,
-    HELM_DETECTION_PATTERNS, ANSIBLE_KEYWORDS, ANSIBLE_MODULES, ANSIBLE_DIRECTORIES,
-    is_helm_template_content,
-)
-
 # Force UTF-8 encoding on Windows
 if sys.platform == 'win32':
     os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -38,19 +31,93 @@ TERMINAL_WIDTH = 80
 
 
 # ============================================================================
+# RELATIVE IMPORTS FOR PRE-COMMIT COMPATIBILITY
+# ============================================================================
+
+def _import_shared_constants():
+    """Import shared_constants with fallback for different installation methods."""
+    try:
+        from shared_constants import (
+            Severity, ValidationResult,
+            HELM_DETECTION_PATTERNS, ANSIBLE_KEYWORDS, ANSIBLE_MODULES, ANSIBLE_DIRECTORIES,
+            is_helm_template_content,
+        )
+        return (Severity, ValidationResult, HELM_DETECTION_PATTERNS, 
+                ANSIBLE_KEYWORDS, ANSIBLE_MODULES, ANSIBLE_DIRECTORIES, is_helm_template_content)
+    except ImportError:
+        pass
+    
+    # Fallback: Load from same directory
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "shared_constants",
+        Path(__file__).parent / "shared_constants.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return (module.Severity, module.ValidationResult, module.HELM_DETECTION_PATTERNS,
+            module.ANSIBLE_KEYWORDS, module.ANSIBLE_MODULES, module.ANSIBLE_DIRECTORIES,
+            module.is_helm_template_content)
+
+(Severity, ValidationResult, HELM_DETECTION_PATTERNS, 
+ ANSIBLE_KEYWORDS, ANSIBLE_MODULES, ANSIBLE_DIRECTORIES, 
+ is_helm_template_content) = _import_shared_constants()
+
+
+def _import_validators():
+    """Import validators with fallback for different installation methods."""
+    k8s_validator = None
+    helm_validator = None
+    
+    # Try direct import
+    try:
+        from kubernetes_validator import KubernetesQuoteValidator
+        k8s_validator = KubernetesQuoteValidator
+    except ImportError:
+        pass
+    
+    try:
+        from helm_validator import HelmValidator
+        helm_validator = HelmValidator
+    except ImportError:
+        pass
+    
+    # Fallback: Load from same directory
+    if k8s_validator is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "kubernetes_validator",
+            Path(__file__).parent / "kubernetes_validator.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        k8s_validator = module.KubernetesQuoteValidator
+    
+    if helm_validator is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "helm_validator",
+            Path(__file__).parent / "helm_validator.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        helm_validator = module.HelmValidator
+    
+    return k8s_validator, helm_validator
+
+KubernetesQuoteValidator, HelmValidator = _import_validators()
+
+
+# ============================================================================
 # ANSI COLOR CODES
 # ============================================================================
 
 class Colors:
     """ANSI color codes for terminal output."""
     
-    # Force colors in pre-commit
     FORCE_COLOR = os.environ.get('FORCE_COLOR') is not None or os.environ.get('PRE_COMMIT') is not None
-    
-    # Check if colors are supported
     ENABLED = FORCE_COLOR or (sys.stdout.isatty() and os.environ.get('NO_COLOR') is None)
     
-    # Colors
     RED = '\033[91m' if ENABLED else ''
     YELLOW = '\033[93m' if ENABLED else ''
     GREEN = '\033[92m' if ENABLED else ''
@@ -81,7 +148,6 @@ class Colors:
     
     @classmethod
     def enable(cls):
-        """Force enable colors."""
         cls.ENABLED = True
         cls.RED = '\033[91m'
         cls.YELLOW = '\033[93m'
@@ -93,7 +159,6 @@ class Colors:
     
     @classmethod
     def disable(cls):
-        """Force disable colors."""
         cls.ENABLED = False
         cls.RED = ''
         cls.YELLOW = ''
@@ -102,35 +167,6 @@ class Colors:
         cls.WHITE = ''
         cls.BOLD = ''
         cls.RESET = ''
-
-
-# ============================================================================
-# RELATIVE IMPORTS FOR PRE-COMMIT
-# ============================================================================
-
-try:
-    from kubernetes_validator import KubernetesQuoteValidator
-    from helm_validator import HelmValidator
-except ImportError:
-    import importlib.util
-    
-    # kubernetes_validator
-    spec = importlib.util.spec_from_file_location(
-        "kubernetes_validator", 
-        Path(__file__).parent / "kubernetes_validator.py"
-    )
-    kubernetes_validator = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(kubernetes_validator)
-    KubernetesQuoteValidator = kubernetes_validator.KubernetesQuoteValidator
-    
-    # helm_validator
-    spec = importlib.util.spec_from_file_location(
-        "helm_validator",
-        Path(__file__).parent / "helm_validator.py"
-    )
-    helm_validator = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(helm_validator)
-    HelmValidator = helm_validator.HelmValidator
 
 
 # ============================================================================
@@ -144,34 +180,20 @@ class OutputFormatter:
         self.width = width
     
     def print_file_header(self, filepath: str, file_type: str):
-        """Print file header."""
         print(f"\n{'=' * self.width}")
         print(f"File: {filepath}")
         print(f"Type: {file_type.upper()}")
         print(f"{'=' * self.width}")
     
     def print_section_separator(self):
-        """Print separator line between sections."""
         print(f"\n{'-' * self.width}\n")
     
     def print_section_header(self, title: str):
-        """Print section header."""
         print(f"> {title}")
         print(f"{'-' * self.width}")
     
     def print_issue(self, line_num: int, column: int, message: str, 
                     current: str, suggestion: str, severity: str = "ERROR"):
-        """
-        Print issue in unified format.
-        
-        Format:
-        [SEVERITY] Line X, Column Y: Message
-        CURRENT: actual content
-        EXPECTED: corrected content
-        
-        (blank line)
-        """
-        # Format severity with color
         if severity.upper() == "ERROR":
             severity_str = Colors.red("[ERROR]")
         elif severity.upper() == "WARNING":
@@ -179,23 +201,19 @@ class OutputFormatter:
         else:
             severity_str = f"[{severity.upper()}]"
         
-        # Line and position
         if column > 0:
             print(f"{severity_str} Line {line_num}, Column {column}: {message}")
         else:
             print(f"{severity_str} Line {line_num}: {message}")
         
-        # CURRENT / EXPECTED
         if current and suggestion:
             print(f"   CURRENT:  {current.strip()}")
             print(f"   EXPECTED: {suggestion.strip()}")
         
-        # Blank line for separation
         print()
     
     def print_yamllint_issue(self, filepath: str, line: int, column: int, 
                              rule: str, message: str, level: str):
-        """Print YAMLlint issue."""
         if level == "error":
             severity_str = Colors.red("[ERROR]")
         else:
@@ -206,7 +224,6 @@ class OutputFormatter:
         print()
     
     def print_summary(self, errors: int, warnings: int, infos: int = 0):
-        """Print summary."""
         print(f"{'-' * self.width}")
         if errors == 0 and warnings == 0:
             print(Colors.green("OK - No issues found"))
@@ -222,17 +239,14 @@ class OutputFormatter:
         print()
     
     def print_skip_message(self, message: str):
-        """Print skip message."""
         print(f"SKIPPED: {message}")
         print()
     
     def print_ok_message(self, message: str):
-        """Print OK message."""
         print(Colors.green(f"OK - {message}"))
         print()
 
 
-# Global Formatter
 formatter = OutputFormatter(TERMINAL_WIDTH)
 
 
@@ -241,7 +255,7 @@ formatter = OutputFormatter(TERMINAL_WIDTH)
 # ============================================================================
 
 class YamlLintValidator:
-    """YAMLlint integration - checks syntax, indentation, line length, etc."""
+    """YAMLlint integration."""
     
     DEFAULT_CONFIG = """
 extends: default
@@ -277,7 +291,6 @@ rules:
         self.config = self._load_config(config_file)
     
     def _load_config(self, config_file: str = None) -> YamlLintConfig:
-        """Load YAMLlint config from file or use default."""
         if config_file and Path(config_file).exists():
             return YamlLintConfig(file=config_file)
         
@@ -295,7 +308,6 @@ rules:
         return YamlLintConfig(content=self.DEFAULT_CONFIG)
     
     def validate(self, filepath: str, content: str = None, print_output: bool = True) -> dict:
-        """Run YAMLlint on a file."""
         file_path = Path(filepath)
         
         if content is None:
@@ -335,7 +347,6 @@ rules:
                 else:
                     warnings.append(issue)
             
-            # Output
             if print_output and (errors or warnings):
                 formatter.print_section_header("YAMLlint")
                 
@@ -370,11 +381,9 @@ class FileTypeDetector:
     @classmethod
     def is_helm_template(cls, content: str, file_path: Path) -> bool:
         """Check if file is a Helm template."""
-        # Use shared function
         if is_helm_template_content(content):
             return True
         
-        # Check path structure
         path_str = str(file_path).replace('\\', '/')
         if '/templates/' in path_str:
             current = file_path.parent
@@ -476,15 +485,6 @@ class HelmValuesLoader:
         self.yaml.preserve_quotes = True
     
     def load_type_map(self, values_source: Path) -> dict:
-        """
-        Load values and extract type map.
-        
-        Args:
-            values_source: Path to values.yaml or values/ directory
-            
-        Returns:
-            dict: Mapping of value paths to types (e.g., {"replicas": "int", "name": "string"})
-        """
         type_map = {}
         
         if values_source is None:
@@ -501,7 +501,6 @@ class HelmValuesLoader:
         return type_map
     
     def _extract_types_from_file(self, filepath: Path) -> dict:
-        """Extract type information from a single values file."""
         type_map = {}
         
         try:
@@ -516,7 +515,6 @@ class HelmValuesLoader:
         return type_map
     
     def _extract_types_recursive(self, data: dict, prefix: str, type_map: dict):
-        """Recursively extract types from nested dict."""
         for key, value in data.items():
             full_key = f"{prefix}.{key}" if prefix else key
             
@@ -553,10 +551,8 @@ class AnsibleValidator:
         self.ansible_lint_cmd = self._find_ansible_lint() if self.wsl_available else None
     
     def _check_wsl(self) -> bool:
-        """Check if WSL is available."""
         if sys.platform != 'win32':
             return False
-        
         try:
             result = subprocess.run(['wsl', '--status'], capture_output=True, timeout=5)
             return result.returncode == 0
@@ -564,7 +560,6 @@ class AnsibleValidator:
             return False
     
     def _find_ansible_lint(self) -> str:
-        """Find ansible-lint in WSL."""
         try:
             result = subprocess.run(
                 ['wsl', 'bash', '-l', '-c', 'which ansible-lint'],
@@ -577,7 +572,6 @@ class AnsibleValidator:
             return None
     
     def _windows_to_wsl_path(self, windows_path: str) -> str:
-        """Convert Windows path to WSL path."""
         path = str(Path(windows_path).absolute()).replace('\\', '/')
         if len(path) >= 2 and path[1] == ':':
             drive = path[0].lower()
@@ -585,7 +579,6 @@ class AnsibleValidator:
         return path
     
     def validate(self, filepath: str, print_output: bool = True) -> dict:
-        """Run ansible-lint via WSL."""
         if not self.wsl_available:
             if print_output:
                 formatter.print_section_header("Ansible-Lint")
@@ -647,18 +640,7 @@ class AnsibleValidator:
 # ============================================================================
 
 class YamlRouter:
-    """
-    Unified Entry Point - YAMLlint + type-specific validation.
-    
-    This class is responsible for:
-    1. File type detection (via FileTypeDetector)
-    2. Loading Helm values (via HelmValuesLoader)
-    3. Routing to appropriate validator
-    4. Formatting output
-    
-    Validators (HelmValidator, KubernetesQuoteValidator, AnsibleValidator)
-    should NOT contain detection logic - they only validate.
-    """
+    """Unified Entry Point - YAMLlint + type-specific validation."""
     
     def __init__(self, verbose: bool = False, skip_ansible: bool = False,
                  skip_yamllint: bool = False, yamllint_config: str = None,
@@ -669,48 +651,34 @@ class YamlRouter:
         self.strict = strict
         self.level = level
         
-        # YAML parser
         self.yaml = YAML()
         self.yaml.preserve_quotes = True
         
-        # Sub-components
         self.yamllint = None if skip_yamllint else YamlLintValidator(config_file=yamllint_config, verbose=verbose)
         self.values_loader = HelmValuesLoader()
         self._ansible_validator = None
     
     @property
     def ansible_validator(self):
-        """Lazy-load Ansible Validator."""
         if self._ansible_validator is None:
             self._ansible_validator = AnsibleValidator(verbose=self.verbose)
         return self._ansible_validator
     
     def validate(self, filepath: str) -> dict:
-        """
-        Main validation method.
-        
-        1. Detect file type
-        2. Run YAMLlint (except for Helm)
-        3. Run type-specific validation
-        4. Format and print output
-        """
         file_path = Path(filepath)
         
         if not file_path.exists():
             return {"success": False, "file": filepath, "type": "unknown",
                     "errors": [{"line": 0, "column": 0, "message": f"File not found: {filepath}"}], "warnings": []}
         
-        # Read content
         try:
             content = file_path.read_text(encoding='utf-8')
         except Exception as e:
             return {"success": False, "file": filepath, "type": "unknown",
                     "errors": [{"line": 0, "column": 0, "message": f"Cannot read file: {e}"}], "warnings": []}
         
-        # Detect file type (before YAML parse for Helm)
         is_helm = FileTypeDetector.is_helm_template(content, file_path)
         
-        # Parse YAML
         data = None
         parse_error = None
         try:
@@ -720,13 +688,10 @@ class YamlRouter:
                 parse_error = str(e)
             data = {}
         
-        # Determine file type
         file_type = FileTypeDetector.detect(file_path, content, data)
         
-        # Print header
         formatter.print_file_header(filepath, file_type)
         
-        # Print parse error
         if parse_error:
             print(f"{Colors.red('[ERROR]')} YAML Parse Error: {parse_error}\n")
             return {"success": False, "file": filepath, "type": file_type,
@@ -735,17 +700,14 @@ class YamlRouter:
         total_errors = []
         total_warnings = []
         
-        # ===== STEP 1: YAMLlint (except for Helm Templates) =====
         if self.yamllint and not is_helm:
             yamllint_result = self.yamllint.validate(filepath, content, print_output=True)
             total_errors.extend(yamllint_result.get('errors', []))
             total_warnings.extend(yamllint_result.get('warnings', []))
             
-            # Separator line if there is further validation
             if file_type in ('k8s', 'helm', 'ansible'):
                 formatter.print_section_separator()
         
-        # ===== STEP 2: Type-specific validation =====
         if file_type == 'helm':
             type_result = self._validate_helm(filepath, content, file_path)
         elif file_type == 'k8s':
@@ -758,28 +720,23 @@ class YamlRouter:
         total_errors.extend(type_result.get('errors', []))
         total_warnings.extend(type_result.get('warnings', []))
         
-        # Summary
         formatter.print_summary(len(total_errors), len(total_warnings))
         
         return {"success": len(total_errors) == 0, "file": filepath, "type": file_type,
                 "errors": total_errors, "warnings": total_warnings, "skipped": type_result.get('skipped', False)}
     
     def _validate_helm(self, filepath: str, content: str, file_path: Path) -> dict:
-        """Validate Helm template with formatted output."""
         formatter.print_section_header("Helm Template Validator")
         
         try:
-            # Find Helm structure and load values (Router's responsibility)
             chart_yaml, values_source = FileTypeDetector.find_helm_structure(file_path)
             
-            # Load type map from values
             type_map = {}
             if values_source:
                 type_map = self.values_loader.load_type_map(values_source)
                 if self.verbose:
                     print(f"   Loaded {len(type_map)} type mappings from values")
             
-            # Create validator with type map (no detection logic in validator)
             validator = HelmValidator(type_map=type_map, strict=self.strict)
             is_valid, errors = validator.validate_content(content, filepath)
             
@@ -787,53 +744,27 @@ class YamlRouter:
             warning_list = []
             
             for error in errors:
-                issue = {
-                    "line": error.line_num,
-                    "column": 0,
-                    "message": error.message,
-                    "current": error.actual,
-                    "suggestion": error.expected,
-                    "severity": error.severity.value
-                }
+                issue = {"line": error.line_num, "column": 0, "message": error.message,
+                         "current": error.actual, "suggestion": error.expected, "severity": error.severity.value}
                 
                 if error.severity.value == 'error':
                     error_list.append(issue)
                 else:
                     warning_list.append(issue)
                 
-                # Output
-                formatter.print_issue(
-                    error.line_num,
-                    0,
-                    error.message,
-                    error.actual,
-                    error.expected,
-                    error.severity.value
-                )
+                formatter.print_issue(error.line_num, 0, error.message, error.actual, error.expected, error.severity.value)
             
             if not errors:
                 formatter.print_ok_message("No Helm template issues found")
             
-            return {
-                "success": is_valid,
-                "file": filepath,
-                "type": "helm",
-                "errors": error_list,
-                "warnings": warning_list,
-            }
+            return {"success": is_valid, "file": filepath, "type": "helm", "errors": error_list, "warnings": warning_list}
             
         except Exception as e:
             print(f"{Colors.red('[ERROR]')} Helm validation error: {e}\n")
-            return {
-                "success": False,
-                "file": filepath,
-                "type": "helm",
-                "errors": [{"line": 0, "column": 0, "message": str(e)}],
-                "warnings": [],
-            }
+            return {"success": False, "file": filepath, "type": "helm",
+                    "errors": [{"line": 0, "column": 0, "message": str(e)}], "warnings": []}
     
     def _validate_k8s(self, filepath: str) -> dict:
-        """Validate Kubernetes manifest with formatted output."""
         formatter.print_section_header("Kubernetes Quote Validator")
         
         try:
@@ -844,53 +775,27 @@ class YamlRouter:
             warning_list = []
             
             for issue in result.issues:
-                issue_dict = {
-                    "line": issue.line_number,
-                    "column": 0,
-                    "message": issue.message,
-                    "current": issue.line_content,
-                    "suggestion": issue.suggestion,
-                    "severity": issue.severity.value
-                }
+                issue_dict = {"line": issue.line_number, "column": 0, "message": issue.message,
+                              "current": issue.line_content, "suggestion": issue.suggestion, "severity": issue.severity.value}
                 
                 if issue.severity == Severity.ERROR:
                     error_list.append(issue_dict)
                 else:
                     warning_list.append(issue_dict)
                 
-                # Output
-                formatter.print_issue(
-                    issue.line_number,
-                    0,
-                    issue.message,
-                    issue.line_content,
-                    issue.suggestion,
-                    issue.severity.value
-                )
+                formatter.print_issue(issue.line_number, 0, issue.message, issue.line_content, issue.suggestion, issue.severity.value)
             
             if not result.issues:
                 formatter.print_ok_message("No Kubernetes quote issues found")
             
-            return {
-                "success": result.is_valid,
-                "file": filepath,
-                "type": "k8s",
-                "errors": error_list,
-                "warnings": warning_list,
-            }
+            return {"success": result.is_valid, "file": filepath, "type": "k8s", "errors": error_list, "warnings": warning_list}
             
         except Exception as e:
             print(f"{Colors.red('[ERROR]')} K8s validation error: {e}\n")
-            return {
-                "success": False,
-                "file": filepath,
-                "type": "k8s",
-                "errors": [{"line": 0, "column": 0, "message": str(e)}],
-                "warnings": [],
-            }
+            return {"success": False, "file": filepath, "type": "k8s",
+                    "errors": [{"line": 0, "column": 0, "message": str(e)}], "warnings": []}
     
     def _validate_ansible(self, filepath: str) -> dict:
-        """Validate Ansible with formatted output."""
         if self.skip_ansible:
             formatter.print_section_header("Ansible-Lint")
             formatter.print_skip_message("Ansible validation skipped (--skip-ansible)")
@@ -917,7 +822,6 @@ def main():
     
     args = parser.parse_args()
     
-    # Handle colors
     if args.force_color:
         Colors.enable()
     elif args.no_color:
@@ -945,7 +849,6 @@ def main():
         total_errors += len(result.get('errors', []))
         total_warnings += len(result.get('warnings', []))
     
-    # Total summary for multiple files
     if len(args.files) > 1:
         print(f"\n{'=' * TERMINAL_WIDTH}")
         summary_parts = [f"{len(args.files)} file(s)"]

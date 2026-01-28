@@ -5,13 +5,6 @@ Helm Template Validator - Validates quoting rules in Helm templates.
 IMPORTANT: This validator does NOT contain file type detection logic.
 File type detection is handled by yaml_router.py (FileTypeDetector).
 This validator ASSUMES the file is already identified as a Helm template.
-
-Rules:
-- Control-flow expressions (if, range, with) are NEVER quoted
-- String literals in comparisons MUST be quoted
-- String output MUST be quoted
-- Integer/Boolean output MUST NOT be quoted
-- Pipe function parameters follow specific quoting rules
 """
 
 import re
@@ -20,13 +13,44 @@ import os
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
 
-# Import from shared constants
-from shared_constants import (
-    Severity, ErrorType, ValidationError,
-    HELM_CONTROL_FLOW_PATTERNS, K8S_INTEGER_FIELDS, K8S_BOOLEAN_FIELDS, K8S_STRING_FIELDS,
-    HELM_STRING_PIPE_FUNCTIONS, HELM_NUMERIC_PIPE_FUNCTIONS, HELM_BOOLEAN_PIPE_FUNCTIONS,
-    is_quoted,
-)
+
+# ============================================================================
+# RELATIVE IMPORTS FOR PRE-COMMIT COMPATIBILITY
+# ============================================================================
+
+def _import_shared_constants():
+    """Import shared_constants with fallback for different installation methods."""
+    try:
+        from shared_constants import (
+            Severity, ErrorType, ValidationError,
+            HELM_CONTROL_FLOW_PATTERNS, K8S_INTEGER_FIELDS, K8S_BOOLEAN_FIELDS, K8S_STRING_FIELDS,
+            HELM_STRING_PIPE_FUNCTIONS, HELM_NUMERIC_PIPE_FUNCTIONS, HELM_BOOLEAN_PIPE_FUNCTIONS,
+            is_quoted,
+        )
+        return (Severity, ErrorType, ValidationError,
+                HELM_CONTROL_FLOW_PATTERNS, K8S_INTEGER_FIELDS, K8S_BOOLEAN_FIELDS, K8S_STRING_FIELDS,
+                HELM_STRING_PIPE_FUNCTIONS, HELM_NUMERIC_PIPE_FUNCTIONS, HELM_BOOLEAN_PIPE_FUNCTIONS,
+                is_quoted)
+    except ImportError:
+        pass
+    
+    # Fallback: Load from same directory
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "shared_constants",
+        Path(__file__).parent / "shared_constants.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return (module.Severity, module.ErrorType, module.ValidationError,
+            module.HELM_CONTROL_FLOW_PATTERNS, module.K8S_INTEGER_FIELDS, module.K8S_BOOLEAN_FIELDS, module.K8S_STRING_FIELDS,
+            module.HELM_STRING_PIPE_FUNCTIONS, module.HELM_NUMERIC_PIPE_FUNCTIONS, module.HELM_BOOLEAN_PIPE_FUNCTIONS,
+            module.is_quoted)
+
+(Severity, ErrorType, ValidationError,
+ HELM_CONTROL_FLOW_PATTERNS, K8S_INTEGER_FIELDS, K8S_BOOLEAN_FIELDS, K8S_STRING_FIELDS,
+ HELM_STRING_PIPE_FUNCTIONS, HELM_NUMERIC_PIPE_FUNCTIONS, HELM_BOOLEAN_PIPE_FUNCTIONS,
+ is_quoted) = _import_shared_constants()
 
 # Force UTF-8 encoding on Windows
 if sys.platform == 'win32':
@@ -38,37 +62,15 @@ if sys.platform == 'win32':
 # ============================================================================
 
 class HelmValidator:
-    """
-    Validates Helm template quoting rules.
-    
-    IMPORTANT: This class does NOT detect if a file is a Helm template.
-    Detection is handled by yaml_router.py. This class ASSUMES the input
-    is already a Helm template.
-    """
+    """Validates Helm template quoting rules."""
     
     def __init__(self, type_map: Dict[str, str] = None, strict: bool = False):
-        """
-        Initialize validator.
-        
-        Args:
-            type_map: Mapping of value paths to types from values.yaml
-            strict: If True, treat warnings as errors
-        """
         self.type_map = type_map or {}
         self.strict = strict
         self.errors: List[ValidationError] = []
     
     def validate_content(self, content: str, filepath: str = "<string>") -> Tuple[bool, List[ValidationError]]:
-        """
-        Validate Helm template content.
-        
-        Args:
-            content: The Helm template content as string
-            filepath: Optional filepath for error messages
-            
-        Returns:
-            Tuple of (is_valid, list of errors)
-        """
+        """Validate Helm template content."""
         self.errors = []
         lines = content.split('\n')
         
