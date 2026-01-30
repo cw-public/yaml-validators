@@ -24,55 +24,40 @@ from typing import List, Optional
 
 class Severity(Enum):
     """Validation severity levels."""
-    ERROR = "error"      # Breaking issues - MUST be fixed
-    WARNING = "warning"  # Best practice - SHOULD be fixed
-    INFO = "info"        # Optional - CAN be fixed
+    ERROR = "error"      # All issues are errors now
 
 
 class IssueType(Enum):
-    """Types of quoting issues (used by kubernetes_validator)."""
-    # ERROR Level
+    """Types of quoting issues."""
+    # Boolean/Type errors
     BOOLEAN_AS_STRING = "boolean_as_string"
-    HELM_TEMPLATE_INT_QUOTED = "helm_template_int_quoted"
-    ANNOTATION_INT_NOT_QUOTED = "annotation_int_not_quoted"
-    GO_TEMPLATE_OPTIONS_NOT_QUOTED = "go_template_options_not_quoted"
     INTEGER_FIELD_QUOTED = "integer_field_quoted"
     
-    # WARNING Level
+    # Annotation errors
+    ANNOTATION_INT_NOT_QUOTED = "annotation_int_not_quoted"
+    ANNOTATION_SPECIAL_CHAR_NOT_QUOTED = "annotation_special_char_not_quoted"
+    
+    # Helm/Go-Template errors
+    HELM_TEMPLATE_INT_QUOTED = "helm_template_int_quoted"
+    HELM_TEMPLATE_STRING_NOT_QUOTED = "helm_template_string_not_quoted"
+    GO_TEMPLATE_OPTIONS_NOT_QUOTED = "go_template_options_not_quoted"
+    
+    # Quoting style errors
     TOP_LEVEL_QUOTED = "top_level_quoted"
     METADATA_QUOTED = "metadata_quoted"
     PATH_NOT_QUOTED = "path_not_quoted"
     URL_NOT_QUOTED = "url_not_quoted"
     PORT_STRING_NOT_QUOTED = "port_string_not_quoted"
-    HELM_TEMPLATE_STRING_NOT_QUOTED = "helm_template_string_not_quoted"
-    ANNOTATION_SPECIAL_CHAR_NOT_QUOTED = "annotation_special_char_not_quoted"
-
-
-class ErrorType(Enum):
-    """Specific error types for Helm validation."""
-    # Control-flow errors
+    
+    # Helm control-flow errors
     IF_EXPRESSION_QUOTED = "if_expression_quoted"
     RANGE_EXPRESSION_QUOTED = "range_expression_quoted"
-    WITH_EXPRESSION_QUOTED = "with_expression_quoted"
-    VARIABLE_ASSIGNMENT_QUOTED = "variable_assignment_quoted"
-    
-    # Comparison errors
     STRING_LITERAL_NOT_QUOTED = "string_literal_not_quoted"
-    NUMERIC_LITERAL_QUOTED = "numeric_literal_quoted"
     
-    # Output errors
-    STRING_OUTPUT_NOT_QUOTED = "string_output_not_quoted"
-    NUMERIC_OUTPUT_QUOTED = "numeric_output_quoted"
-    BOOLEAN_OUTPUT_QUOTED = "boolean_output_quoted"
-    
-    # Pipe function errors
+    # Helm pipe function errors
     DEFAULT_STRING_NOT_QUOTED = "default_string_not_quoted"
-    DEFAULT_NUMERIC_QUOTED = "default_numeric_quoted"
     TERNARY_STRING_NOT_QUOTED = "ternary_string_not_quoted"
     REPLACE_PARAM_NOT_QUOTED = "replace_param_not_quoted"
-    
-    # General
-    GENERIC_QUOTING_ERROR = "generic_quoting_error"
 
 
 # ============================================================================
@@ -81,28 +66,14 @@ class ErrorType(Enum):
 
 @dataclass
 class QuoteIssue:
-    """Represents a quoting issue (used by kubernetes_validator)."""
+    """Represents a quoting issue."""
     line_number: int
     line_content: str
     issue_type: IssueType
     field_path: str
     message: str
     suggestion: str
-    severity: Severity
-
-
-@dataclass
-class ValidationError:
-    """Represents a validation error (used by helm_validator)."""
-    line_num: int
-    message: str
-    actual: str
-    expected: str
-    severity: Severity = Severity.WARNING
-    error_type: ErrorType = ErrorType.GENERIC_QUOTING_ERROR
-    
-    def __str__(self) -> str:
-        return f"Line {self.line_num}: {self.message}"
+    severity: Severity = Severity.ERROR  # Always ERROR now
 
 
 @dataclass
@@ -111,9 +82,7 @@ class ValidationResult:
     file_path: str
     is_valid: bool
     issues: List[QuoteIssue] = field(default_factory=list)
-    errors: int = 0
-    warnings: int = 0
-    infos: int = 0
+    error_count: int = 0
 
 
 # ============================================================================
@@ -258,16 +227,6 @@ HELM_BOOLEAN_PIPE_FUNCTIONS = [
     'empty', 'not', 'and', 'or', 'eq', 'ne', 'lt', 'le', 'gt', 'ge',
     'contains', 'hasPrefix', 'hasSuffix', 'hasKey', 'kindIs', 'typeIs',
 ]
-
-# Functions with literal parameters that need quoting
-HELM_FUNCTIONS_WITH_LITERAL_PARAMS = [
-    'replace', 'default', 'ternary', 'coalesce', 'required',
-    'trimPrefix', 'trimSuffix', 'trimAll', 'hasPrefix', 'hasSuffix',
-    'printf', 'split', 'splitList', 'join', 'lookup',
-]
-
-# Comparison functions
-HELM_COMPARISON_FUNCTIONS = ['eq', 'ne', 'lt', 'le', 'gt', 'ge', 'not']
 
 
 # ============================================================================

@@ -2,15 +2,15 @@ from setuptools import setup, find_packages
 
 setup(
     name="yaml-validators",
-    version="1.0.0",
-    description="YAML validators for Helm, Kubernetes, and Ansible",
-    author="Artur",
+    version="2.0.0",
+    description="Unified YAML validators for Helm, Kubernetes, and Ansible",
+    author="Your Name",
     python_requires=">=3.8",
     py_modules=[
         "yaml_router",
-        "kubernetes_validator", 
-        "helm_validator",
-        "shared_constants",  # <-- WICHTIG: Hier hinzufügen!
+        "unified_validator",
+        "helm_trimmer",
+        "shared_constants",
     ],
     install_requires=[
         "ruamel.yaml>=0.17",
@@ -19,8 +19,7 @@ setup(
     entry_points={
         "console_scripts": [
             "yaml-router=yaml_router:main",
-            "k8s-validator=kubernetes_validator:main",
-            "helm-validator=helm_validator:main",
+            "unified-validator=unified_validator:main",
         ],
     },
 )
