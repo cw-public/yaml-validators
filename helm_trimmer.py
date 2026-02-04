@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# filepath: c:\Users\ahryhory\Documents\Git-repos\yaml-validators\helm_trimmer.py
 """
 Helm Trimmer - Replaces Helm template syntax with placeholders for YAMLlint.
 
@@ -10,7 +11,7 @@ This module:
 
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 
 @dataclass
@@ -96,19 +97,71 @@ class HelmTrimmer:
                 return True
         return False
     
-    def _replace_expressions(self, line: str) -> tuple:
-        """Replace {{ }} expressions with YAML-valid placeholders."""
+    def _replace_expressions(self, line: str) -> Tuple[str, Dict[str, str]]:
+        """
+        Replace {{ }} expressions with YAML-valid placeholders.
+        
+        Handles both:
+        - Standalone: value: {{ .Values.foo }}  → value: "__PLACEHOLDER__"
+        - In string:  value: "prefix-{{ .Values.foo }}-suffix"  → value: "prefix-__PLACEHOLDER__-suffix"
+        """
         placeholders = {}
+        result = []
+        i = 0
         
-        def replace_match(match):
-            original = match.group(0)
-            self.placeholder_counter += 1
-            placeholder = f'"__HELM_PLACEHOLDER_{self.placeholder_counter}__"'
-            placeholders[placeholder] = original
-            return placeholder
+        while i < len(line):
+            # Look for {{ 
+            if line[i:i+2] == '{{':
+                # Find the matching }}
+                end_pos = line.find('}}', i)
+                if end_pos == -1:
+                    # No closing }}, just append rest of line
+                    result.append(line[i:])
+                    break
+                
+                # Extract the full Helm expression
+                helm_expr = line[i:end_pos+2]
+                self.placeholder_counter += 1
+                
+                # Check if we're inside a quoted string
+                before = line[:i]
+                in_double_quotes = self._is_inside_quotes(before, '"')
+                in_single_quotes = self._is_inside_quotes(before, "'")
+                
+                if in_double_quotes or in_single_quotes:
+                    # Inside quotes: use placeholder WITHOUT quotes
+                    placeholder = f'__HELM_PLACEHOLDER_{self.placeholder_counter}__'
+                else:
+                    # Not inside quotes: use placeholder WITH quotes
+                    placeholder = f'"__HELM_PLACEHOLDER_{self.placeholder_counter}__"'
+                
+                placeholders[placeholder] = helm_expr
+                result.append(placeholder)
+                i = end_pos + 2
+            else:
+                result.append(line[i])
+                i += 1
         
-        modified_line = self.HELM_EXPRESSION_PATTERN.sub(replace_match, line)
-        return modified_line, placeholders
+        return ''.join(result), placeholders
+    
+    def _is_inside_quotes(self, text: str, quote_char: str) -> bool:
+        """
+        Check if we're inside a quoted string.
+        
+        Counts unescaped quotes - odd number means we're inside.
+        """
+        count = 0
+        i = 0
+        while i < len(text):
+            if text[i] == quote_char:
+                # Check if escaped
+                if i > 0 and text[i-1] == '\\':
+                    pass  # Escaped, don't count
+                else:
+                    count += 1
+            i += 1
+        
+        return count % 2 == 1
 
 
 def trim_helm_for_yamllint(content: str) -> TrimResult:
@@ -123,3 +176,44 @@ def trim_helm_for_yamllint(content: str) -> TrimResult:
     """
     trimmer = HelmTrimmer()
     return trimmer.trim(content)
+
+
+# ============================================================================
+# CLI for testing
+# ============================================================================
+
+def main():
+    """CLI entry point for testing."""
+    import sys
+    
+    if len(sys.argv) < 2:
+        print("Usage: python helm_trimmer.py <file.yaml>")
+        sys.exit(1)
+    
+    filepath = sys.argv[1]
+    
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except Exception as e:
+        print(f"Error reading file: {e}")
+        sys.exit(1)
+    
+    result = trim_helm_for_yamllint(content)
+    
+    print("=" * 60)
+    print("TRIMMED CONTENT:")
+    print("=" * 60)
+    print(result.trimmed_content)
+    print()
+    print("=" * 60)
+    print("PLACEHOLDER MAP:")
+    print("=" * 60)
+    for placeholder, original in result.placeholder_map.items():
+        print(f"  {placeholder} → {original}")
+    print()
+    print(f"Removed lines: {result.removed_lines}")
+
+
+if __name__ == '__main__':
+    main()
