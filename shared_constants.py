@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# filepath: c:\Users\ahryhory\Documents\Git-repos\yaml-validators\shared_constants.py
 """
 Shared Constants - Central definitions for all validators.
 
@@ -36,6 +37,9 @@ class IssueType(Enum):
     # Annotation errors
     ANNOTATION_INT_NOT_QUOTED = "annotation_int_not_quoted"
     ANNOTATION_SPECIAL_CHAR_NOT_QUOTED = "annotation_special_char_not_quoted"
+    
+    # Label errors
+    LABEL_VALUE_NOT_QUOTED = "label_value_not_quoted"
     
     # Helm/Go-Template errors
     HELM_TEMPLATE_INT_QUOTED = "helm_template_int_quoted"
@@ -160,7 +164,7 @@ K8S_INTEGER_FIELDS = {
     'terminationGracePeriodSeconds', 'revisionHistoryLimit',
     'progressDeadlineSeconds', 'minReadySeconds', 'backoffLimit',
     'completions', 'parallelism', 'activeDeadlineSeconds',
-    'limit', 'factor', 'retries', 'revision',
+    'limit', 'factor', 'retries',
 }
 
 # Boolean fields
@@ -168,6 +172,7 @@ K8S_BOOLEAN_FIELDS = {
     'enabled', 'disabled', 'tls', 'hostNetwork', 'hostPID', 'hostIPC',
     'privileged', 'readOnlyRootFilesystem', 'runAsNonRoot',
     'allowPrivilegeEscalation', 'stdin', 'stdinOnce', 'tty',
+    'prune', 'selfHeal', 'automated',
 }
 
 # String fields that SHOULD be quoted
@@ -180,7 +185,7 @@ K8S_STRING_FIELDS = {
 # String fields that SHOULD be quoted (paths, URLs, etc.)
 K8S_STRING_FIELDS_REQUIRE_QUOTE = {
     'path', 'repoURL', 'revision', 'targetRevision', 'chart',
-    'ref', 'url', 'image', 'repository', 'tag',
+    'ref', 'url', 'image', 'repository', 'tag', 'project',
 }
 
 # Port object string fields
@@ -193,12 +198,28 @@ K8S_ANNOTATION_NUMERIC_KEYS = {
     'prometheus.io/port',
 }
 
-# Context keys for parsing
+# Context keys for parsing (extended for deep nesting)
 K8S_CONTEXT_KEYS = {
+    # Standard K8s
     'metadata', 'annotations', 'labels', 'spec', 'template',
-    'generators', 'sources', 'destination', 'syncPolicy', 'ports',
-    'env', 'containers', 'volumes', 'goTemplateOptions', 'helm',
-    'valueFiles', 'data', 'stringData', 'rules', 'paths',
+    'ports', 'env', 'containers', 'volumes', 'data', 'stringData',
+    'rules', 'paths',
+    # Selectors
+    'selector', 'matchLabels', 'matchExpressions',
+    # ArgoCD ApplicationSet
+    'generators', 'sources', 'destination', 'syncPolicy', 'syncOptions',
+    'goTemplateOptions', 'helm', 'valueFiles',
+    # ArgoCD Generators
+    'matrix', 'merge', 'list', 'clusters', 'git', 'files',
+    'pullRequest', 'scmProvider', 'clusterDecisionResource',
+}
+
+# String list contexts - Lists where ALL items should be quoted
+K8S_STRING_LIST_CONTEXTS = {
+    'valueFiles',      # Helm value file paths
+    'syncOptions',     # ArgoCD sync options
+    'finalizers',      # Finalizer strings
+    'files',           # Git generator files (contains path)
 }
 
 

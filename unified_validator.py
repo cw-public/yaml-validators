@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# filepath: c:\Users\ahryhory\Documents\Git-repos\yaml-validators\unified_validator.py
 """
 Unified Quote Validator - Combines K8s and Helm quoting rules.
 
@@ -12,7 +13,7 @@ ALL issues are ERRORS (no warnings).
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 
 # ============================================================================
@@ -26,12 +27,35 @@ def _import_shared_constants():
             Severity, IssueType, QuoteIssue, ValidationResult,
             K8S_TOP_LEVEL_NO_QUOTE, K8S_METADATA_NO_QUOTE, K8S_INTEGER_FIELDS,
             K8S_BOOLEAN_FIELDS, K8S_STRING_FIELDS, K8S_PORT_STRING_FIELDS,
-            K8S_STRING_FIELDS_REQUIRE_QUOTE, K8S_CONTEXT_KEYS,
+            K8S_STRING_FIELDS_REQUIRE_QUOTE, K8S_CONTEXT_KEYS, K8S_STRING_LIST_CONTEXTS,
             HELM_CONTROL_FLOW_PATTERNS, HELM_INT_BOOL_PATTERNS,
             HELM_STRING_PIPE_FUNCTIONS, HELM_NUMERIC_PIPE_FUNCTIONS, HELM_BOOLEAN_PIPE_FUNCTIONS,
             is_quoted, contains_helm_template, is_int_bool_helm_template, looks_like_integer,
         )
-        return locals()
+        return {
+            'Severity': Severity,
+            'IssueType': IssueType,
+            'QuoteIssue': QuoteIssue,
+            'ValidationResult': ValidationResult,
+            'K8S_TOP_LEVEL_NO_QUOTE': K8S_TOP_LEVEL_NO_QUOTE,
+            'K8S_METADATA_NO_QUOTE': K8S_METADATA_NO_QUOTE,
+            'K8S_INTEGER_FIELDS': K8S_INTEGER_FIELDS,
+            'K8S_BOOLEAN_FIELDS': K8S_BOOLEAN_FIELDS,
+            'K8S_STRING_FIELDS': K8S_STRING_FIELDS,
+            'K8S_PORT_STRING_FIELDS': K8S_PORT_STRING_FIELDS,
+            'K8S_STRING_FIELDS_REQUIRE_QUOTE': K8S_STRING_FIELDS_REQUIRE_QUOTE,
+            'K8S_CONTEXT_KEYS': K8S_CONTEXT_KEYS,
+            'K8S_STRING_LIST_CONTEXTS': K8S_STRING_LIST_CONTEXTS,
+            'HELM_CONTROL_FLOW_PATTERNS': HELM_CONTROL_FLOW_PATTERNS,
+            'HELM_INT_BOOL_PATTERNS': HELM_INT_BOOL_PATTERNS,
+            'HELM_STRING_PIPE_FUNCTIONS': HELM_STRING_PIPE_FUNCTIONS,
+            'HELM_NUMERIC_PIPE_FUNCTIONS': HELM_NUMERIC_PIPE_FUNCTIONS,
+            'HELM_BOOLEAN_PIPE_FUNCTIONS': HELM_BOOLEAN_PIPE_FUNCTIONS,
+            'is_quoted': is_quoted,
+            'contains_helm_template': contains_helm_template,
+            'is_int_bool_helm_template': is_int_bool_helm_template,
+            'looks_like_integer': looks_like_integer,
+        }
     except ImportError:
         import importlib.util
         spec = importlib.util.spec_from_file_location(
@@ -55,6 +79,7 @@ K8S_STRING_FIELDS = _constants['K8S_STRING_FIELDS']
 K8S_PORT_STRING_FIELDS = _constants['K8S_PORT_STRING_FIELDS']
 K8S_STRING_FIELDS_REQUIRE_QUOTE = _constants['K8S_STRING_FIELDS_REQUIRE_QUOTE']
 K8S_CONTEXT_KEYS = _constants['K8S_CONTEXT_KEYS']
+K8S_STRING_LIST_CONTEXTS = _constants['K8S_STRING_LIST_CONTEXTS']
 HELM_CONTROL_FLOW_PATTERNS = _constants['HELM_CONTROL_FLOW_PATTERNS']
 HELM_INT_BOOL_PATTERNS = _constants['HELM_INT_BOOL_PATTERNS']
 HELM_STRING_PIPE_FUNCTIONS = _constants['HELM_STRING_PIPE_FUNCTIONS']
@@ -172,11 +197,15 @@ class UnifiedQuoteValidator:
     
     def _update_context(self, stack, indent: int, line: str):
         """Update YAML context stack."""
+        # Remove contexts with same or greater indent
         stack = [(i, ctx) for i, ctx in stack if i < indent]
+        
+        # Extract key from line
         if ':' in line:
             key = line.split(':')[0].strip().lstrip('- ')
             if key in K8S_CONTEXT_KEYS:
                 stack.append((indent, key))
+        
         return stack
     
     # ========================================================================
@@ -205,10 +234,15 @@ class UnifiedQuoteValidator:
         if not value:
             return
         
+        # Determine context flags
         in_annotations = 'annotations' in context
+        in_labels = 'labels' in context or 'matchLabels' in context
+        in_selector = 'selector' in context or 'matchLabels' in context
+        in_spec = 'spec' in context
+        in_template = 'template' in context
         
-        # Rule: Boolean as string
-        if not in_annotations:
+        # Rule: Boolean as string (not in annotations/labels)
+        if not in_annotations and not in_labels:
             if value.lower() in ('"true"', '"false"', "'true'", "'false'"):
                 self._add_issue(
                     line_num, line,
@@ -218,7 +252,7 @@ class UnifiedQuoteValidator:
                     f'{key}: {value.strip("\"\'").lower()}'
                 )
         
-        # Rule: Annotation values must be strings
+        # Rule: Annotation values must be quoted strings
         if in_annotations:
             if looks_like_integer(value) and not is_quoted(value):
                 self._add_issue(
@@ -237,8 +271,21 @@ class UnifiedQuoteValidator:
                     f'{key}: "{value}"'
                 )
         
+        # Rule: Label/Selector values must be quoted strings
+        if in_labels or in_selector:
+            if value and not is_quoted(value):
+                # Skip Helm templates (checked separately)
+                if not contains_helm_template(value):
+                    self._add_issue(
+                        line_num, line,
+                        IssueType.LABEL_VALUE_NOT_QUOTED,
+                        f'{"matchLabels" if in_selector else "labels"}.{key}',
+                        f"Label value '{value}' should be quoted",
+                        f'{key}: "{value}"'
+                    )
+        
         # Rule: Integer fields must not be quoted
-        if key in K8S_INTEGER_FIELDS and not in_annotations:
+        if key in K8S_INTEGER_FIELDS and not in_annotations and not in_labels:
             if is_quoted(value):
                 inner = value.strip('"\'')
                 if inner.isdigit() or (inner.startswith('-') and inner[1:].isdigit()):
@@ -254,14 +301,14 @@ class UnifiedQuoteValidator:
         if key == 'goTemplateOptions':
             self._check_go_template_options(line_num, line, value)
         
-        # Rule: Top-level fields usually not quoted
+        # Rule: Top-level fields should not be quoted
         if not context and key in K8S_TOP_LEVEL_NO_QUOTE:
             if is_quoted(value):
                 self._add_issue(
                     line_num, line,
                     IssueType.TOP_LEVEL_QUOTED,
                     key,
-                    f"Top-level field '{key}' is usually not quoted",
+                    f"Top-level field '{key}' should not be quoted",
                     f'{key}: {value.strip("\"\'")}'
                 )
         
@@ -272,12 +319,12 @@ class UnifiedQuoteValidator:
                     line_num, line,
                     IssueType.METADATA_QUOTED,
                     f'metadata.{key}',
-                    f"Metadata '{key}' is usually not quoted",
+                    f"Metadata '{key}' should not be quoted",
                     f'{key}: {value.strip("\"\'")}'
                 )
         
-        # Rule: URLs/paths should be quoted
-        if 'spec' in context or 'template' in context:
+        # Rule: URLs/paths should be quoted (in spec/template, not in labels)
+        if (in_spec or in_template) and not in_labels and not in_annotations:
             if not contains_helm_template(value):
                 if key in K8S_STRING_FIELDS_REQUIRE_QUOTE:
                     if not is_quoted(value) and value:
@@ -314,6 +361,7 @@ class UnifiedQuoteValidator:
             quoted = is_quoted(value)
             is_int_bool = is_int_bool_helm_template(value)
             
+            # Integer/Boolean fields or patterns - should NOT be quoted
             if key in K8S_INTEGER_FIELDS or key in K8S_BOOLEAN_FIELDS or is_int_bool:
                 if quoted:
                     self._add_issue(
@@ -323,6 +371,7 @@ class UnifiedQuoteValidator:
                         "Helm template for Integer/Boolean must not be quoted",
                         f'{key}: {value.strip("\"\'")}'
                     )
+            # String fields - should BE quoted
             else:
                 if not quoted:
                     self._add_issue(
@@ -335,11 +384,25 @@ class UnifiedQuoteValidator:
     
     def _check_k8s_list_item(self, line_num: int, line: str, stripped: str, context: List[str]):
         """Check K8s list items."""
-        value = stripped[2:].strip()
+        value = stripped[2:].strip()  # Remove '- ' prefix
         
-        # goTemplateOptions list items
+        # Skip if it's a nested object (has colon that starts a key)
+        if ':' in value and not is_quoted(value):
+            # Check if it's really a key: value pair (not a path with colon)
+            if not value.startswith('../') and not value.startswith('./'):
+                colon_pos = value.find(':')
+                before_colon = value[:colon_pos].strip()
+                # If before colon looks like a key (alphanumeric with _-)
+                if re.match(r'^[a-zA-Z_][a-zA-Z0-9_.-]*$', before_colon):
+                    return
+        
+        # Skip empty values
+        if not value:
+            return
+        
+        # goTemplateOptions list items - MUST be quoted
         if 'goTemplateOptions' in context:
-            if value and not is_quoted(value):
+            if not is_quoted(value):
                 self._add_issue(
                     line_num, line,
                     IssueType.GO_TEMPLATE_OPTIONS_NOT_QUOTED,
@@ -347,9 +410,10 @@ class UnifiedQuoteValidator:
                     "goTemplateOptions value must be quoted",
                     f'- "{value}"'
                 )
+            return
         
-        # Ports list items (integers)
-        if 'ports' in context and ':' not in value:
+        # Ports list items (integers) - must NOT be quoted
+        if 'ports' in context:
             if is_quoted(value) and value.strip('"\'').isdigit():
                 self._add_issue(
                     line_num, line,
@@ -358,17 +422,32 @@ class UnifiedQuoteValidator:
                     "Integer in array must not be quoted",
                     f'- {value.strip("\"\'")}'
                 )
+            return
         
-        # valueFiles with Helm template
-        if 'valueFiles' in context and contains_helm_template(value):
+        # String list contexts - ALL items should be quoted
+        matching_context = K8S_STRING_LIST_CONTEXTS.intersection(set(context))
+        
+        if matching_context:
+            ctx_name = list(matching_context)[0]
             if not is_quoted(value):
                 self._add_issue(
                     line_num, line,
-                    IssueType.HELM_TEMPLATE_STRING_NOT_QUOTED,
-                    'valueFiles[]',
-                    "Helm template string must be quoted",
+                    IssueType.PATH_NOT_QUOTED,
+                    f'{ctx_name}[]',
+                    f"{ctx_name} value should be quoted",
                     f'- "{value}"'
                 )
+            return
+        
+        # General: List items with paths (../ or ./) should be quoted
+        if (value.startswith('../') or value.startswith('./')) and not is_quoted(value):
+            self._add_issue(
+                line_num, line,
+                IssueType.PATH_NOT_QUOTED,
+                'list[]',
+                "Path value should be quoted",
+                f'- "{value}"'
+            )
     
     def _check_go_template_options(self, line_num: int, line: str, value: str):
         """Check goTemplateOptions inline array."""
