@@ -42,9 +42,6 @@ class HelmTrimmer:
         r'^\s*\{\{-?\s*\$[a-zA-Z_][a-zA-Z0-9_]*\s*:=.*\}\}\s*$',
     ]
     
-    # Pattern to match Helm expressions
-    HELM_EXPRESSION_PATTERN = re.compile(r'\{\{-?.*?-?\}\}')
-    
     def __init__(self):
         self.placeholder_counter = 0
     
@@ -101,13 +98,19 @@ class HelmTrimmer:
         """
         Replace {{ }} expressions with YAML-valid placeholders.
         
-        Handles both:
-        - Standalone: value: {{ .Values.foo }}  → value: "__PLACEHOLDER__"
-        - In string:  value: "prefix-{{ .Values.foo }}-suffix"  → value: "prefix-__PLACEHOLDER__-suffix"
+        Handles:
+        - Standalone value: key: {{ .Values.foo }}
+        - In quoted string: key: "prefix-{{ .Values.foo }}-suffix"
+        - List items: - {{ .Values.foo }}
+        - List items with text: - ../path/{{ .Values.foo }}.yaml
         """
         placeholders = {}
         result = []
         i = 0
+        
+        # Determine line context
+        stripped = line.lstrip()
+        is_list_item = stripped.startswith('- ')
         
         while i < len(line):
             # Look for {{ 
@@ -127,12 +130,37 @@ class HelmTrimmer:
                 before = line[:i]
                 in_double_quotes = self._is_inside_quotes(before, '"')
                 in_single_quotes = self._is_inside_quotes(before, "'")
+                in_quotes = in_double_quotes or in_single_quotes
                 
-                if in_double_quotes or in_single_quotes:
-                    # Inside quotes: use placeholder WITHOUT quotes
+                # Check what comes after the template
+                after = line[end_pos+2:]
+                has_suffix = bool(after.strip()) and not after.strip().startswith('#')
+                
+                # Check what comes before (excluding leading whitespace and list marker)
+                before_content = before.lstrip()
+                if before_content.startswith('- '):
+                    before_content = before_content[2:]
+                # Also handle "key: " prefix
+                if ': ' in before_content:
+                    before_content = before_content.split(': ', 1)[-1]
+                has_prefix = bool(before_content) and not before_content.endswith(': ')
+                
+                # Determine if we need quotes around placeholder
+                if in_quotes:
+                    # Inside quotes: NO quotes on placeholder
                     placeholder = f'__HELM_PLACEHOLDER_{self.placeholder_counter}__'
+                elif has_prefix or has_suffix:
+                    # Part of a larger string (like path): NO quotes
+                    # The whole value needs to be quoted, but we can't do that here
+                    # Just use placeholder without quotes - YAMLlint will complain
+                    # but the quote validator will catch it
+                    placeholder = f'__HELM_PLACEHOLDER_{self.placeholder_counter}__'
+                elif is_list_item and self._is_standalone_list_template(stripped):
+                    # Standalone list item like: - {{ .Values.foo }}
+                    # Needs quotes around it
+                    placeholder = f'"__HELM_PLACEHOLDER_{self.placeholder_counter}__"'
                 else:
-                    # Not inside quotes: use placeholder WITH quotes
+                    # Standalone value like: key: {{ .Values.foo }}
                     placeholder = f'"__HELM_PLACEHOLDER_{self.placeholder_counter}__"'
                 
                 placeholders[placeholder] = helm_expr
@@ -162,6 +190,30 @@ class HelmTrimmer:
             i += 1
         
         return count % 2 == 1
+    
+    def _is_standalone_list_template(self, stripped: str) -> bool:
+        """
+        Check if line is a standalone list item with only a Helm template.
+        
+        Examples:
+        - {{ .Values.foo }}  → True (standalone)
+        - ../path/{{ .Values.foo }}.yaml  → False (has prefix/suffix)
+        - "{{ .Values.foo }}"  → False (already quoted)
+        """
+        if not stripped.startswith('- '):
+            return False
+        
+        value = stripped[2:].strip()
+        
+        # Already quoted?
+        if (value.startswith('"') and value.endswith('"')) or \
+           (value.startswith("'") and value.endswith("'")):
+            return False
+        
+        # Only contains {{ }} with no other content?
+        # Remove all {{ }} expressions and check if anything remains
+        without_templates = re.sub(r'\{\{.*?\}\}', '', value).strip()
+        return len(without_templates) == 0
 
 
 def trim_helm_for_yamllint(content: str) -> TrimResult:
