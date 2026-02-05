@@ -87,23 +87,40 @@ HELM_INT_BOOL_PATTERNS = [
     r'\|\s*default\s+(true|false)\b',
 ]
 
+# Helm detection patterns (for yaml_router.py)
+HELM_DETECTION_PATTERNS = [
+    r'\{\{.*\}\}',  # Basic {{ }} syntax
+    r'\{\{-.*-\}\}',  # With whitespace control
+]
+
+
+# ============================================================================
+# ANSIBLE PATTERNS (for yaml_router.py)
+# ============================================================================
+
+ANSIBLE_KEYWORDS = {
+    'hosts', 'tasks', 'roles', 'handlers', 'vars', 'vars_files',
+    'pre_tasks', 'post_tasks', 'gather_facts', 'become', 'become_user',
+    'environment', 'collections', 'strategy', 'serial', 'max_fail_percentage',
+}
+
+ANSIBLE_MODULES = {
+    'ansible.builtin', 'ansible.posix', 'community.general',
+    'copy', 'template', 'file', 'lineinfile', 'shell', 'command',
+    'apt', 'yum', 'dnf', 'pip', 'service', 'systemd', 'user', 'group',
+    'debug', 'fail', 'assert', 'set_fact', 'include_tasks', 'import_tasks',
+    'include_role', 'import_role', 'block', 'rescue', 'always',
+}
+
+ANSIBLE_DIRECTORIES = {
+    'playbooks', 'roles', 'tasks', 'handlers', 'vars', 'defaults',
+    'files', 'templates', 'meta', 'inventory', 'group_vars', 'host_vars',
+}
+
 
 # ============================================================================
 # FIELD DEFINITIONS
 # ============================================================================
-
-# String fields in spec that SHOULD be quoted
-STRING_FIELDS_REQUIRE_QUOTE = {
-    # Paths and URLs
-    'path', 'repoURL', 'revision', 'targetRevision', 'ref', 'url',
-    # Container/Image
-    'image', 'repository', 'tag',
-    # Helm/ArgoCD
-    'chart', 'releaseName', 'project',
-    # Identifiers
-    'name', 'namespace', 'server', 'secretName', 'configMapName',
-    'serviceAccountName', 'clusterName', 'context', 'cluster',
-}
 
 # Port object string fields
 PORT_STRING_FIELDS = {'name', 'protocol'}
@@ -140,3 +157,8 @@ def is_int_bool_helm_template(value: str) -> bool:
         if re.search(pattern, value):
             return True
     return False
+
+
+def is_helm_template_content(content: str) -> bool:
+    """Check if content contains Helm template syntax."""
+    return '{{' in content and '}}' in content
