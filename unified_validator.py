@@ -7,12 +7,13 @@ Key Rules:
 2. IN metadata → int/bool MUST be quoted, strings DON'T need quotes
 3. OUTSIDE metadata → int/bool must NOT be quoted, strings MUST be quoted
 4. Block scalar content (| or >) is SKIPPED entirely
+5. Inline comments are stripped before type detection
 """
 
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 from dataclasses import dataclass
 
 
@@ -210,6 +211,57 @@ def is_string_value(value: str) -> bool:
     return not is_non_string
 
 
+def strip_inline_comment(value: str) -> str:
+    """
+    Remove inline comment from value.
+    
+    YAML inline comments start with # and go to end of line.
+    But # inside quotes or Helm templates is NOT a comment.
+    
+    Examples:
+        "5        # comment" → "5"
+        "true  # is enabled" → "true"
+        '"quoted # not comment"' → '"quoted # not comment"'
+        "{{ .Values.x }}  # helm" → "{{ .Values.x }}"
+    """
+    if not value:
+        return value
+    
+    v = value.strip()
+    
+    # If value is quoted, return as-is (# inside quotes is not a comment)
+    if (v.startswith('"') and v.endswith('"')) or \
+       (v.startswith("'") and v.endswith("'")):
+        return v
+    
+    # Handle Helm templates - find # that's OUTSIDE {{ }}
+    if '{{' in v:
+        # Track depth of {{ }}
+        depth = 0
+        i = 0
+        while i < len(v):
+            if v[i:i+2] == '{{':
+                depth += 1
+                i += 2
+                continue
+            elif v[i:i+2] == '}}':
+                depth -= 1
+                i += 2
+                continue
+            elif v[i] == '#' and depth == 0:
+                # Found comment outside Helm template
+                return v[:i].strip()
+            i += 1
+        return v
+    
+    # Simple case: find # and strip everything after
+    if '#' in v:
+        comment_pos = v.find('#')
+        return v[:comment_pos].strip()
+    
+    return v
+
+
 # ============================================================================
 # TOP-LEVEL FIELDS (never quoted)
 # ============================================================================
@@ -280,8 +332,10 @@ class ContextTracker:
                 key_part = temp_stripped[:colon_pos].strip()
                 value_part = temp_stripped[colon_pos + 1:].strip()
                 
-                if not value_part or value_part in ('|', '>', '|+', '|-', '>+', '>-') or \
-                   is_block_scalar_indicator(value_part):
+                # Strip comment from value part for block scalar detection
+                value_part_clean = strip_inline_comment(value_part)
+                
+                if not value_part_clean or is_block_scalar_indicator(value_part_clean):
                     self.stack.append(ContextEntry(indent=indent, key=key_part))
         
         return self.get_path()
@@ -317,6 +371,7 @@ class UnifiedQuoteValidator:
     2. IN metadata → int/bool MUST be quoted, strings DON'T need quotes
     3. OUTSIDE metadata → int/bool must NOT be quoted, strings MUST be quoted
     4. Block scalar content (| or >) is SKIPPED entirely
+    5. Inline comments are stripped before type detection
     """
     
     def __init__(self, strict: bool = False, type_map: Dict[str, str] = None):
@@ -356,11 +411,8 @@ class UnifiedQuoteValidator:
             if stripped:
                 current_indent = len(line) - len(line.lstrip())
             else:
-                # Empty line doesn't end block scalar
-                if self.in_block_scalar:
-                    continue
-                else:
-                    continue
+                # Empty line - continue (doesn't end block scalar)
+                continue
             
             # Skip comments
             if stripped.startswith('#'):
@@ -429,8 +481,6 @@ class UnifiedQuoteValidator:
         if ':' not in stripped:
             return False
         
-        # Find the last colon (to handle keys like "http://")
-        # Actually, find the first colon that's a key separator
         colon_pos = stripped.find(':')
         if colon_pos < 0:
             return False
@@ -441,8 +491,14 @@ class UnifiedQuoteValidator:
         if not value_part:
             return False
         
+        # Strip inline comment before checking
+        value_part_clean = strip_inline_comment(value_part)
+        
+        if not value_part_clean:
+            return False
+        
         # Check if it's a block scalar indicator
-        return is_block_scalar_indicator(value_part)
+        return is_block_scalar_indicator(value_part_clean)
     
     def _is_helm_control_flow(self, line: str) -> bool:
         for pattern in HELM_CONTROL_FLOW_PATTERNS:
@@ -465,8 +521,11 @@ class UnifiedQuoteValidator:
             key = kv_part[:colon_pos].strip()
             value = kv_part[colon_pos + 1:].strip()
             
-            if value and not is_block_scalar_indicator(value):
-                self._validate_key_value(line_num, line, key, value, has_helm)
+            # Strip inline comment
+            value_clean = strip_inline_comment(value)
+            
+            if value_clean and not is_block_scalar_indicator(value_clean):
+                self._validate_key_value(line_num, line, key, value_clean, has_helm)
             return
         
         # Regular key: value
@@ -477,11 +536,14 @@ class UnifiedQuoteValidator:
         key = stripped[:colon_pos].strip()
         value = stripped[colon_pos + 1:].strip()
         
+        # Strip inline comment
+        value_clean = strip_inline_comment(value)
+        
         # Skip if no value or if it's a block scalar indicator
-        if not value or is_block_scalar_indicator(value):
+        if not value_clean or is_block_scalar_indicator(value_clean):
             return
         
-        self._validate_key_value(line_num, line, key, value, has_helm)
+        self._validate_key_value(line_num, line, key, value_clean, has_helm)
     
     def _validate_key_value(self, line_num: int, line: str, key: str, value: str, has_helm: bool):
         """Validate a key: value pair."""
@@ -566,43 +628,49 @@ class UnifiedQuoteValidator:
         if not value:
             return
         
+        # Strip inline comment
+        value_clean = strip_inline_comment(value)
+        
+        if not value_clean:
+            return
+        
         context_path = self.context.get_path()
         parent = context_path[-1] if context_path else ''
         in_metadata = self.context.in_metadata()
         
         # Handle Helm templates
-        if has_helm and contains_helm_template(value):
+        if has_helm and contains_helm_template(value_clean):
             if in_metadata:
                 # In metadata, Helm templates that output int/bool must be quoted
-                if is_int_bool_helm_template(value) and not is_quoted(value):
+                if is_int_bool_helm_template(value_clean) and not is_quoted(value_clean):
                     self._add_issue(line_num, line, IssueType.HELM_TEMPLATE_STRING_NOT_QUOTED,
                         f'{parent}[]', 
                         "Helm template in metadata that may output int/bool must be quoted",
-                        f'- "{value}"')
+                        f'- "{value_clean}"')
             else:
                 # Outside metadata, string Helm templates must be quoted
-                if not is_int_bool_helm_template(value) and not is_quoted(value):
+                if not is_int_bool_helm_template(value_clean) and not is_quoted(value_clean):
                     self._add_issue(line_num, line, IssueType.HELM_TEMPLATE_STRING_NOT_QUOTED,
                         f'{parent}[]', "Helm template string must be quoted",
-                        f'- "{value}"')
+                        f'- "{value_clean}"')
             return
         
         # Check value type
-        is_non_string, detected_type = would_yaml_parse_as_non_string(value)
+        is_non_string, detected_type = would_yaml_parse_as_non_string(value_clean)
         
         if in_metadata:
             # In metadata: int/bool must be quoted, strings OK without
             if is_non_string:
                 self._add_issue(line_num, line, IssueType.METADATA_VALUE_NOT_QUOTED,
                     f'{parent}[]', 
-                    f"Value '{value}' would be parsed as {detected_type}, must be quoted",
-                    f'- "{value}"')
+                    f"Value '{value_clean}' would be parsed as {detected_type}, must be quoted",
+                    f'- "{value_clean}"')
         else:
             # Outside metadata: strings MUST be quoted
-            if not is_non_string and not is_quoted(value):
+            if not is_non_string and not is_quoted(value_clean):
                 self._add_issue(line_num, line, IssueType.STRING_VALUE_NOT_QUOTED,
                     f'{parent}[]', "String value must be quoted",
-                    f'- "{value}"')
+                    f'- "{value_clean}"')
     
     def _validate_helm_in_metadata(self, line_num: int, line: str, key: str, 
                                     value: str, field_path: str):
