@@ -1,85 +1,224 @@
 #!/usr/bin/env python3
 # filepath: c:\Users\ahryhory\Documents\Git-repos\yaml-validators\unified_validator.py
 """
-Unified Quote Validator - Indent-based traversal approach.
+Unified Quote Validator - Context-based rules.
 
-Key principles:
-1. Track context by INDENT, not by knowing all possible keys
-2. Apply rules based on CONTEXT PATTERNS (labels, annotations, etc.)
-3. Apply field-specific rules based on FIELD NAME (replicas, port, etc.)
-
-ALL issues are ERRORS (no warnings).
+Key Rules:
+1. apiVersion, kind → NEVER quoted
+2. IN metadata → int/bool MUST be quoted, strings DON'T need quotes
+3. OUTSIDE metadata → int/bool must NOT be quoted, strings MUST be quoted
 """
 
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from dataclasses import dataclass
 
 
 # ============================================================================
-# IMPORTS
+# INLINE DEFINITIONS
 # ============================================================================
 
-def _import_shared_constants():
-    """Import shared_constants with fallback."""
-    try:
-        from shared_constants import (
-            Severity, IssueType, QuoteIssue, ValidationResult,
-            INTEGER_FIELDS, BOOLEAN_FIELDS, STRING_FIELDS_REQUIRE_QUOTE,
-            PORT_STRING_FIELDS, STRING_LIST_CONTEXTS, QUOTED_VALUE_CONTEXTS,
-            HELM_CONTROL_FLOW_PATTERNS, HELM_INT_BOOL_PATTERNS,
-            is_quoted, strip_quotes, contains_helm_template, 
-            is_int_bool_helm_template, looks_like_integer, looks_like_boolean,
-        )
-        return {
-            'Severity': Severity, 'IssueType': IssueType,
-            'QuoteIssue': QuoteIssue, 'ValidationResult': ValidationResult,
-            'INTEGER_FIELDS': INTEGER_FIELDS, 'BOOLEAN_FIELDS': BOOLEAN_FIELDS,
-            'STRING_FIELDS_REQUIRE_QUOTE': STRING_FIELDS_REQUIRE_QUOTE,
-            'PORT_STRING_FIELDS': PORT_STRING_FIELDS,
-            'STRING_LIST_CONTEXTS': STRING_LIST_CONTEXTS,
-            'QUOTED_VALUE_CONTEXTS': QUOTED_VALUE_CONTEXTS,
-            'HELM_CONTROL_FLOW_PATTERNS': HELM_CONTROL_FLOW_PATTERNS,
-            'HELM_INT_BOOL_PATTERNS': HELM_INT_BOOL_PATTERNS,
-            'is_quoted': is_quoted, 'strip_quotes': strip_quotes,
-            'contains_helm_template': contains_helm_template,
-            'is_int_bool_helm_template': is_int_bool_helm_template,
-            'looks_like_integer': looks_like_integer,
-            'looks_like_boolean': looks_like_boolean,
-        }
-    except ImportError:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "shared_constants", Path(__file__).parent / "shared_constants.py"
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return {name: getattr(module, name) for name in dir(module) if not name.startswith('_')}
-
-_c = _import_shared_constants()
-Severity = _c['Severity']
-IssueType = _c['IssueType']
-QuoteIssue = _c['QuoteIssue']
-ValidationResult = _c['ValidationResult']
-INTEGER_FIELDS = _c['INTEGER_FIELDS']
-BOOLEAN_FIELDS = _c['BOOLEAN_FIELDS']
-STRING_FIELDS_REQUIRE_QUOTE = _c['STRING_FIELDS_REQUIRE_QUOTE']
-PORT_STRING_FIELDS = _c['PORT_STRING_FIELDS']
-STRING_LIST_CONTEXTS = _c['STRING_LIST_CONTEXTS']
-QUOTED_VALUE_CONTEXTS = _c['QUOTED_VALUE_CONTEXTS']
-HELM_CONTROL_FLOW_PATTERNS = _c['HELM_CONTROL_FLOW_PATTERNS']
-is_quoted = _c['is_quoted']
-strip_quotes = _c['strip_quotes']
-contains_helm_template = _c['contains_helm_template']
-is_int_bool_helm_template = _c['is_int_bool_helm_template']
-looks_like_integer = _c['looks_like_integer']
-looks_like_boolean = _c['looks_like_boolean']
+try:
+    from shared_constants import (
+        Severity, IssueType, QuoteIssue, ValidationResult,
+        PORT_STRING_FIELDS, STRING_LIST_CONTEXTS,
+        HELM_CONTROL_FLOW_PATTERNS,
+        is_quoted, strip_quotes, contains_helm_template,
+        is_int_bool_helm_template,
+    )
+except ImportError:
+    from enum import Enum
+    from dataclasses import field as dataclass_field
+    
+    class Severity(Enum):
+        ERROR = "error"
+    
+    class IssueType(Enum):
+        BOOLEAN_AS_STRING = "boolean_as_string"
+        INTEGER_FIELD_QUOTED = "integer_field_quoted"
+        HELM_TEMPLATE_INT_QUOTED = "helm_template_int_quoted"
+        HELM_TEMPLATE_STRING_NOT_QUOTED = "helm_template_string_not_quoted"
+        GO_TEMPLATE_OPTIONS_NOT_QUOTED = "go_template_options_not_quoted"
+        PATH_NOT_QUOTED = "path_not_quoted"
+        URL_NOT_QUOTED = "url_not_quoted"
+        PORT_STRING_NOT_QUOTED = "port_string_not_quoted"
+        STRING_VALUE_NOT_QUOTED = "string_value_not_quoted"
+        TOP_LEVEL_QUOTED = "top_level_quoted"
+        METADATA_VALUE_NOT_QUOTED = "metadata_value_not_quoted"
+    
+    @dataclass
+    class QuoteIssue:
+        line_number: int
+        line_content: str
+        issue_type: IssueType
+        field_path: str
+        message: str
+        suggestion: str
+        severity: Severity = Severity.ERROR
+    
+    @dataclass
+    class ValidationResult:
+        file_path: str
+        is_valid: bool
+        issues: List['QuoteIssue'] = dataclass_field(default_factory=list)
+        error_count: int = 0
+    
+    PORT_STRING_FIELDS = {'name', 'protocol'}
+    STRING_LIST_CONTEXTS = {'valueFiles', 'syncOptions', 'finalizers', 'goTemplateOptions'}
+    
+    HELM_CONTROL_FLOW_PATTERNS = [
+        r'^\s*\{\{-?\s*if\s', r'^\s*\{\{-?\s*else\s*if\s',
+        r'^\s*\{\{-?\s*else\s*-?\}\}', r'^\s*\{\{-?\s*end\s*-?\}\}',
+        r'^\s*\{\{-?\s*range\s', r'^\s*\{\{-?\s*with\s',
+        r'^\s*\{\{-?\s*define\s', r'^\s*\{\{-?\s*template\s',
+        r'^\s*\{\{-?\s*include\s', r'^\s*\{\{-?\s*block\s',
+        r'^\s*\{\{-?\s*/\*', r'^\s*\{\{-?\s*\$[a-zA-Z_][a-zA-Z0-9_]*\s*:=',
+    ]
+    
+    HELM_INT_BOOL_PATTERNS = [
+        r'\.replicas\b', r'\.replicaCount\b', r'\.port\b', r'\.targetPort\b',
+        r'\.enabled\b', r'\.disabled\b', r'\|\s*int\b', r'\|\s*bool\b',
+        r'\|\s*default\s+\d+', r'\|\s*default\s+(true|false)\b',
+    ]
+    
+    def is_quoted(value: str) -> bool:
+        v = value.strip()
+        return (v.startswith('"') and v.endswith('"')) or \
+               (v.startswith("'") and v.endswith("'"))
+    
+    def strip_quotes(value: str) -> str:
+        v = value.strip()
+        return v[1:-1] if is_quoted(v) else v
+    
+    def contains_helm_template(value: str) -> bool:
+        return '{{' in value and '}}' in value
+    
+    def is_int_bool_helm_template(value: str) -> bool:
+        for pattern in HELM_INT_BOOL_PATTERNS:
+            if re.search(pattern, value):
+                return True
+        return False
 
 
 # ============================================================================
-# CONTEXT TRACKER (Indent-based)
+# TYPE DETECTION FUNCTIONS
+# ============================================================================
+
+def looks_like_integer(value: str) -> bool:
+    """Check if YAML would parse this as integer."""
+    v = value.strip()
+    if not v:
+        return False
+    # Pure digits
+    if v.isdigit():
+        return True
+    # Negative numbers
+    if v.startswith('-') and len(v) > 1 and v[1:].isdigit():
+        return True
+    # Octal (0o755)
+    if v.startswith('0o') and len(v) > 2:
+        return True
+    # Hex (0xFF)
+    if v.startswith('0x') and len(v) > 2:
+        return True
+    return False
+
+
+def looks_like_boolean(value: str) -> bool:
+    """Check if YAML would parse this as boolean."""
+    return value.strip().lower() in ('true', 'false', 'yes', 'no', 'on', 'off')
+
+
+def looks_like_float(value: str) -> bool:
+    """Check if YAML would parse this as float."""
+    v = value.strip()
+    if not v:
+        return False
+    # Special floats
+    if v.lower() in ('.inf', '-.inf', '.nan'):
+        return True
+    # Scientific notation
+    if 'e' in v.lower():
+        try:
+            float(v)
+            return True
+        except ValueError:
+            return False
+    # Decimal numbers (but not version strings like 1.2.3)
+    if '.' in v:
+        parts = v.split('.')
+        if len(parts) == 2:  # Only one dot (e.g., 1.5)
+            try:
+                float(v)
+                return True
+            except ValueError:
+                return False
+    return False
+
+
+def looks_like_null(value: str) -> bool:
+    """Check if YAML would parse this as null."""
+    return value.strip().lower() in ('null', '~')
+
+
+def looks_like_date(value: str) -> bool:
+    """Check if YAML would parse this as date/timestamp."""
+    v = value.strip()
+    # ISO date: 2024-01-21
+    if re.match(r'^\d{4}-\d{2}-\d{2}$', v):
+        return True
+    # ISO datetime: 2024-01-21T10:00:00
+    if re.match(r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}', v):
+        return True
+    return False
+
+
+def would_yaml_parse_as_non_string(value: str) -> tuple:
+    """
+    Check if YAML would parse this value as something other than string.
+    
+    Returns: (is_non_string, detected_type)
+    """
+    if not value or is_quoted(value):
+        return (False, None)
+    
+    v = value.strip()
+    
+    if looks_like_boolean(v):
+        return (True, 'boolean')
+    if looks_like_integer(v):
+        return (True, 'integer')
+    if looks_like_float(v):
+        return (True, 'float')
+    if looks_like_null(v):
+        return (True, 'null')
+    if looks_like_date(v):
+        return (True, 'date')
+    
+    return (False, None)
+
+
+def is_string_value(value: str) -> bool:
+    """Check if this is a plain string (not int/bool/float/null/date)."""
+    if not value:
+        return False
+    if is_quoted(value):
+        return True  # Already quoted = string
+    is_non_string, _ = would_yaml_parse_as_non_string(value)
+    return not is_non_string
+
+
+# ============================================================================
+# TOP-LEVEL FIELDS (never quoted)
+# ============================================================================
+
+TOP_LEVEL_NO_QUOTE = {'apiVersion', 'kind'}
+
+
+# ============================================================================
+# CONTEXT TRACKER
 # ============================================================================
 
 @dataclass
@@ -90,12 +229,7 @@ class ContextEntry:
 
 
 class ContextTracker:
-    """
-    Tracks YAML context by indent level - NOT by key names!
-    
-    This is the KEY innovation - we don't need to know all possible keys,
-    we just track the hierarchy based on indentation.
-    """
+    """Tracks YAML context by indent level."""
     
     def __init__(self):
         self.stack: List[ContextEntry] = []
@@ -109,45 +243,39 @@ class ContextTracker:
         
         indent = len(line) - len(line.lstrip())
         
-        # Pop all contexts with same or greater indent
+        # Pop contexts with same or greater indent
         self.stack = [e for e in self.stack if e.indent < indent]
         
-        # Check if this line starts a new context (key with no value)
+        # Check if this line starts a new context
         if ':' in stripped:
-            colon_pos = stripped.find(':')
-            key_part = stripped[:colon_pos].strip().lstrip('- ')
-            value_part = stripped[colon_pos + 1:].strip()
-            
-            # If no value after colon, this key starts a new context block
-            if not value_part:
-                self.stack.append(ContextEntry(indent=indent, key=key_part))
+            temp_stripped = stripped.lstrip('- ')
+            colon_pos = temp_stripped.find(':')
+            if colon_pos > 0:
+                key_part = temp_stripped[:colon_pos].strip()
+                value_part = temp_stripped[colon_pos + 1:].strip()
+                
+                # No value = new context block
+                if not value_part or value_part in ('|', '>'):
+                    self.stack.append(ContextEntry(indent=indent, key=key_part))
         
         return self.get_path()
     
     def reset(self):
-        """Reset context (for document separators)."""
         self.stack = []
     
     def get_path(self) -> List[str]:
-        """Get current context as list of keys."""
         return [e.key for e in self.stack]
     
-    def get_path_string(self) -> str:
-        """Get current context as dot-separated string."""
-        return '.'.join(self.get_path())
-    
-    def contains(self, key: str) -> bool:
-        """Check if key is anywhere in current context."""
-        return key in self.get_path()
+    def in_metadata(self) -> bool:
+        """Check if we're anywhere inside metadata."""
+        return 'metadata' in self.get_path()
     
     def parent_is(self, key: str) -> bool:
-        """Check if immediate parent is key."""
         path = self.get_path()
         return len(path) > 0 and path[-1] == key
     
-    def in_any(self, keys: set) -> bool:
-        """Check if any of the keys are in current context."""
-        return bool(keys.intersection(set(self.get_path())))
+    def contains(self, key: str) -> bool:
+        return key in self.get_path()
 
 
 # ============================================================================
@@ -156,12 +284,12 @@ class ContextTracker:
 
 class UnifiedQuoteValidator:
     """
-    Unified validator using indent-based context tracking.
+    Unified validator with context-based rules.
     
-    Key principles:
-    1. Track context by INDENT, not by knowing all keys
-    2. Apply rules based on CONTEXT PATTERNS
-    3. Apply field-specific rules based on FIELD NAME
+    Rules:
+    1. apiVersion, kind → NEVER quoted
+    2. IN metadata → int/bool MUST be quoted, strings DON'T need quotes
+    3. OUTSIDE metadata → int/bool must NOT be quoted, strings MUST be quoted
     """
     
     def __init__(self, strict: bool = False, type_map: Dict[str, str] = None):
@@ -171,20 +299,18 @@ class UnifiedQuoteValidator:
         self.context = ContextTracker()
     
     def validate_file(self, file_path: str) -> ValidationResult:
-        """Validate a file."""
         try:
             content = Path(file_path).read_text(encoding='utf-8')
             return self.validate_content(content, file_path)
         except Exception as e:
             return ValidationResult(
                 file_path=file_path, is_valid=False,
-                issues=[QuoteIssue(0, "", IssueType.STRING_VALUE_NOT_QUOTED,
+                issues=[QuoteIssue(0, "", IssueType.PATH_NOT_QUOTED,
                                    "", f"Cannot read file: {e}", "")],
                 error_count=1
             )
     
     def validate_content(self, content: str, file_path: str = "<string>") -> ValidationResult:
-        """Validate content."""
         self.issues = []
         self.context = ContextTracker()
         
@@ -201,15 +327,19 @@ class UnifiedQuoteValidator:
                 self.context.reset()
                 continue
             
-            # Skip Helm control-flow lines
+            # Skip Helm control-flow
             if has_helm and self._is_helm_control_flow(stripped):
                 continue
             
-            # Update context FIRST
-            context_path = self.context.update(line)
+            # Skip block scalar content
+            if self._is_in_block_scalar(lines, line_num - 1):
+                continue
             
-            # Validate the line
-            self._validate_line(line_num, line, stripped, context_path, has_helm)
+            # Update context
+            self.context.update(line)
+            
+            # Validate
+            self._validate_line(line_num, line, stripped, has_helm)
         
         return ValidationResult(
             file_path=file_path,
@@ -219,22 +349,56 @@ class UnifiedQuoteValidator:
         )
     
     def _is_helm_control_flow(self, line: str) -> bool:
-        """Check if line is pure Helm control-flow."""
         for pattern in HELM_CONTROL_FLOW_PATTERNS:
             if re.match(pattern, line):
                 return True
         return False
     
-    def _validate_line(self, line_num: int, line: str, stripped: str,
-                       context_path: List[str], has_helm: bool):
+    def _is_in_block_scalar(self, lines: List[str], current_index: int) -> bool:
+        if current_index == 0:
+            return False
+        
+        current_indent = len(lines[current_index]) - len(lines[current_index].lstrip())
+        
+        for i in range(current_index - 1, -1, -1):
+            prev_line = lines[i]
+            prev_stripped = prev_line.strip()
+            
+            if not prev_stripped or prev_stripped.startswith('#'):
+                continue
+            
+            prev_indent = len(prev_line) - len(prev_line.lstrip())
+            
+            if prev_indent < current_indent:
+                if prev_stripped.endswith('|') or prev_stripped.endswith('>'):
+                    return True
+                return False
+            
+            if prev_indent == current_indent:
+                return False
+        
+        return False
+    
+    def _validate_line(self, line_num: int, line: str, stripped: str, has_helm: bool):
         """Validate a single line."""
         
-        # Handle list items
-        if stripped.startswith('- '):
-            self._validate_list_item(line_num, line, stripped, context_path, has_helm)
+        # List items without key: value
+        if stripped.startswith('- ') and ':' not in stripped:
+            self._validate_list_item(line_num, line, stripped, has_helm)
             return
         
-        # Handle key: value pairs
+        # List items with key: value
+        if stripped.startswith('- ') and ':' in stripped:
+            kv_part = stripped[2:].strip()
+            colon_pos = kv_part.find(':')
+            key = kv_part[:colon_pos].strip()
+            value = kv_part[colon_pos + 1:].strip()
+            
+            if value and value not in ('|', '>'):
+                self._validate_key_value(line_num, line, key, value, has_helm)
+            return
+        
+        # Regular key: value
         if ':' not in stripped:
             return
         
@@ -242,171 +406,165 @@ class UnifiedQuoteValidator:
         key = stripped[:colon_pos].strip()
         value = stripped[colon_pos + 1:].strip()
         
-        if not value:
+        if not value or value in ('|', '>'):
             return
         
+        self._validate_key_value(line_num, line, key, value, has_helm)
+    
+    def _validate_key_value(self, line_num: int, line: str, key: str, value: str, has_helm: bool):
+        """Validate a key: value pair."""
+        
+        context_path = self.context.get_path()
         field_path = '.'.join(context_path + [key]) if context_path else key
         
-        # Context flags
-        in_labels = self.context.in_any({'labels', 'matchLabels'})
-        in_annotations = self.context.contains('annotations')
-        in_ports = self.context.contains('ports')
+        in_metadata = self.context.in_metadata()
         
         # ================================================================
-        # RULE 1: Labels/MatchLabels - values MUST be quoted
+        # RULE 1: Top-level apiVersion, kind → NEVER quoted
         # ================================================================
-        if in_labels:
-            if not is_quoted(value) and not contains_helm_template(value):
-                self._add_issue(line_num, line, IssueType.LABEL_VALUE_NOT_QUOTED,
-                    field_path, f"Label value '{value}' must be quoted",
-                    f'{key}: "{value}"')
-            return
-        
-        # ================================================================
-        # RULE 2: Annotations - values MUST be quoted
-        # ================================================================
-        if in_annotations:
-            if not is_quoted(value) and not contains_helm_template(value):
-                self._add_issue(line_num, line, IssueType.ANNOTATION_INT_NOT_QUOTED,
-                    field_path, f"Annotation value '{value}' must be quoted",
-                    f'{key}: "{value}"')
-            return
-        
-        # ================================================================
-        # RULE 3: Integer fields - must NOT be quoted
-        # ================================================================
-        if key in INTEGER_FIELDS:
+        if not context_path and key in TOP_LEVEL_NO_QUOTE:
             if is_quoted(value):
-                inner = strip_quotes(value)
-                if looks_like_integer(inner):
-                    self._add_issue(line_num, line, IssueType.INTEGER_FIELD_QUOTED,
-                        field_path, f"Integer field '{key}' must not be quoted",
-                        f'{key}: {inner}')
+                self._add_issue(line_num, line, IssueType.TOP_LEVEL_QUOTED,
+                    key, f"'{key}' must not be quoted",
+                    f'{key}: {strip_quotes(value)}')
             return
         
         # ================================================================
-        # RULE 4: Boolean fields - must NOT be quoted as string
+        # RULE 2: Inside metadata → int/bool MUST be quoted, strings OK without
         # ================================================================
-        if key in BOOLEAN_FIELDS:
-            if is_quoted(value):
-                inner = strip_quotes(value).lower()
-                if inner in ('true', 'false'):
-                    self._add_issue(line_num, line, IssueType.BOOLEAN_AS_STRING,
-                        field_path, f"Boolean field '{key}' must not be quoted",
-                        f'{key}: {inner}')
+        if in_metadata:
+            # Skip Helm templates
+            if contains_helm_template(value):
+                self._validate_helm_in_metadata(line_num, line, key, value, field_path)
+                return
+            
+            # Check if value would parse as non-string (int/bool/etc)
+            is_non_string, detected_type = would_yaml_parse_as_non_string(value)
+            
+            if is_non_string:
+                # Non-string in metadata MUST be quoted
+                self._add_issue(line_num, line, IssueType.METADATA_VALUE_NOT_QUOTED,
+                    field_path, 
+                    f"Value '{value}' would be parsed as {detected_type}, must be quoted",
+                    f'{key}: "{value}"')
+            
+            # Strings in metadata don't need quotes - no error
             return
         
         # ================================================================
-        # RULE 5: Helm templates
+        # RULE 3: Outside metadata
         # ================================================================
+        
+        # Handle Helm templates first
         if has_helm and contains_helm_template(value):
             self._validate_helm_template(line_num, line, key, value, field_path)
             return
         
-        # ================================================================
-        # RULE 6: String fields that should be quoted
-        # ================================================================
-        if key in STRING_FIELDS_REQUIRE_QUOTE:
-            if not is_quoted(value) and value:
-                if not looks_like_boolean(value) and not looks_like_integer(value):
-                    self._add_issue(line_num, line, IssueType.STRING_VALUE_NOT_QUOTED,
-                        field_path, f"Field '{key}' should be quoted",
-                        f'{key}: "{value}"')
-            return
+        # Check what type the value is
+        is_non_string, detected_type = would_yaml_parse_as_non_string(value)
         
-        # ================================================================
-        # RULE 7: URLs should be quoted
-        # ================================================================
-        if value.startswith('http://') or value.startswith('https://'):
-            if not is_quoted(value):
-                self._add_issue(line_num, line, IssueType.URL_NOT_QUOTED,
-                    field_path, "URL should be quoted", f'{key}: "{value}"')
-            return
-        
-        # ================================================================
-        # RULE 8: Port string fields
-        # ================================================================
-        if in_ports and key in PORT_STRING_FIELDS:
-            if not is_quoted(value) and value:
-                self._add_issue(line_num, line, IssueType.PORT_STRING_NOT_QUOTED,
-                    f'ports[].{key}', f"Port '{key}' should be quoted",
+        if is_quoted(value):
+            # Value is quoted - check if it SHOULD be quoted
+            inner = strip_quotes(value)
+            inner_non_string, inner_type = would_yaml_parse_as_non_string(inner)
+            
+            if inner_non_string and inner_type in ('integer', 'boolean'):
+                # Quoted int/bool outside metadata = ERROR
+                issue_type = IssueType.INTEGER_FIELD_QUOTED if inner_type == 'integer' \
+                             else IssueType.BOOLEAN_AS_STRING
+                self._add_issue(line_num, line, issue_type,
+                    field_path, f"{inner_type.title()} value must not be quoted",
+                    f'{key}: {inner}')
+            # Quoted string = OK
+        else:
+            # Value is NOT quoted
+            if is_non_string:
+                # Non-string without quotes outside metadata = OK (int/bool)
+                pass
+            else:
+                # String without quotes outside metadata = ERROR
+                self._add_issue(line_num, line, IssueType.STRING_VALUE_NOT_QUOTED,
+                    field_path, f"String value must be quoted",
                     f'{key}: "{value}"')
-            return
-        
-        # ================================================================
-        # RULE 9: goTemplateOptions
-        # ================================================================
-        if key == 'goTemplateOptions':
-            self._validate_go_template_options(line_num, line, value)
     
-    def _validate_list_item(self, line_num: int, line: str, stripped: str,
-                            context_path: List[str], has_helm: bool):
-        """Validate list items."""
+    def _validate_list_item(self, line_num: int, line: str, stripped: str, has_helm: bool):
+        """Validate pure list items."""
         value = stripped[2:].strip()
         
         if not value:
             return
         
-        # Check if it's a nested object
-        if ':' in value and not is_quoted(value):
-            colon_pos = value.find(':')
-            before_colon = value[:colon_pos].strip()
-            if re.match(r'^[a-zA-Z_][a-zA-Z0-9_.-]*$', before_colon):
-                return
-        
+        context_path = self.context.get_path()
         parent = context_path[-1] if context_path else ''
+        in_metadata = self.context.in_metadata()
         
-        # String list contexts - ALL items should be quoted
-        if parent in STRING_LIST_CONTEXTS:
-            if not is_quoted(value):
-                self._add_issue(line_num, line, IssueType.PATH_NOT_QUOTED,
-                    f'{parent}[]', f"{parent} value should be quoted",
-                    f'- "{value}"')
+        # Handle Helm templates
+        if has_helm and contains_helm_template(value):
+            if in_metadata:
+                # In metadata, Helm templates that output int/bool must be quoted
+                if is_int_bool_helm_template(value) and not is_quoted(value):
+                    self._add_issue(line_num, line, IssueType.HELM_TEMPLATE_STRING_NOT_QUOTED,
+                        f'{parent}[]', 
+                        "Helm template in metadata that may output int/bool must be quoted",
+                        f'- "{value}"')
+            else:
+                # Outside metadata, string Helm templates must be quoted
+                if not is_int_bool_helm_template(value) and not is_quoted(value):
+                    self._add_issue(line_num, line, IssueType.HELM_TEMPLATE_STRING_NOT_QUOTED,
+                        f'{parent}[]', "Helm template string must be quoted",
+                        f'- "{value}"')
             return
         
-        # Path values
-        if (value.startswith('../') or value.startswith('./')) and not is_quoted(value):
-            self._add_issue(line_num, line, IssueType.PATH_NOT_QUOTED,
-                f'{parent}[]' if parent else 'list[]',
-                "Path value should be quoted", f'- "{value}"')
+        # Check value type
+        is_non_string, detected_type = would_yaml_parse_as_non_string(value)
+        
+        if in_metadata:
+            # In metadata: int/bool must be quoted, strings OK without
+            if is_non_string:
+                self._add_issue(line_num, line, IssueType.METADATA_VALUE_NOT_QUOTED,
+                    f'{parent}[]', 
+                    f"Value '{value}' would be parsed as {detected_type}, must be quoted",
+                    f'- "{value}"')
+        else:
+            # Outside metadata: strings MUST be quoted
+            if not is_non_string and not is_quoted(value):
+                self._add_issue(line_num, line, IssueType.STRING_VALUE_NOT_QUOTED,
+                    f'{parent}[]', "String value must be quoted",
+                    f'- "{value}"')
+    
+    def _validate_helm_in_metadata(self, line_num: int, line: str, key: str, 
+                                    value: str, field_path: str):
+        """Validate Helm templates inside metadata."""
+        is_int_bool = is_int_bool_helm_template(value)
+        
+        # In metadata, if Helm template could output int/bool, must be quoted
+        if is_int_bool and not is_quoted(value):
+            self._add_issue(line_num, line, IssueType.HELM_TEMPLATE_STRING_NOT_QUOTED,
+                field_path, 
+                "Helm template in metadata that may output int/bool must be quoted",
+                f'{key}: "{value}"')
     
     def _validate_helm_template(self, line_num: int, line: str, key: str,
                                  value: str, field_path: str):
-        """Validate Helm template quoting."""
+        """Validate Helm template quoting outside metadata."""
         quoted = is_quoted(value)
-        is_int_bool = is_int_bool_helm_template(value) or \
-                      key in INTEGER_FIELDS or key in BOOLEAN_FIELDS
+        is_int_bool = is_int_bool_helm_template(value)
         
         if is_int_bool:
+            # Int/bool Helm template should NOT be quoted
             if quoted:
                 self._add_issue(line_num, line, IssueType.HELM_TEMPLATE_INT_QUOTED,
                     field_path, "Helm template for Integer/Boolean must not be quoted",
                     f'{key}: {strip_quotes(value)}')
         else:
+            # String Helm template MUST be quoted
             if not quoted:
                 self._add_issue(line_num, line, IssueType.HELM_TEMPLATE_STRING_NOT_QUOTED,
                     field_path, "Helm template string must be quoted",
                     f'{key}: "{value}"')
     
-    def _validate_go_template_options(self, line_num: int, line: str, value: str):
-        """Validate goTemplateOptions."""
-        if value.startswith('[') and value.endswith(']'):
-            inner = value[1:-1]
-            if not inner:
-                return
-            
-            items = [i.strip() for i in inner.split(',') if i.strip()]
-            unquoted = [i for i in items if not is_quoted(i)]
-            
-            if unquoted:
-                quoted_items = ', '.join(f'"{strip_quotes(i)}"' for i in items)
-                self._add_issue(line_num, line, IssueType.GO_TEMPLATE_OPTIONS_NOT_QUOTED,
-                    'goTemplateOptions', "goTemplateOptions values must be quoted",
-                    f'goTemplateOptions: [{quoted_items}]')
-    
     def _add_issue(self, line_num: int, line: str, issue_type: IssueType,
                    field_path: str, message: str, suggestion: str):
-        """Add an issue."""
         self.issues.append(QuoteIssue(
             line_number=line_num,
             line_content=line.rstrip(),
@@ -423,7 +581,6 @@ class UnifiedQuoteValidator:
 # ============================================================================
 
 def main():
-    """CLI entry point."""
     import argparse
     
     parser = argparse.ArgumentParser(description='Unified Quote Validator')
