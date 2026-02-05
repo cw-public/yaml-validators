@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# filepath: c:\Users\ahryhory\Documents\Git-repos\yaml-validators\unified_validator.py
 """
 Unified Quote Validator - Context-based rules.
 
@@ -7,12 +6,13 @@ Key Rules:
 1. apiVersion, kind → NEVER quoted
 2. IN metadata → int/bool MUST be quoted, strings DON'T need quotes
 3. OUTSIDE metadata → int/bool must NOT be quoted, strings MUST be quoted
+4. Block scalar content (| or >) is SKIPPED entirely
 """
 
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 from dataclasses import dataclass
 
 
@@ -205,7 +205,7 @@ def is_string_value(value: str) -> bool:
     if not value:
         return False
     if is_quoted(value):
-        return True  # Already quoted = string
+        return True
     is_non_string, _ = would_yaml_parse_as_non_string(value)
     return not is_non_string
 
@@ -215,6 +215,34 @@ def is_string_value(value: str) -> bool:
 # ============================================================================
 
 TOP_LEVEL_NO_QUOTE = {'apiVersion', 'kind'}
+
+
+# ============================================================================
+# BLOCK SCALAR DETECTION
+# ============================================================================
+
+# Pattern for block scalar indicators: | or > with optional chomping (+/-) and indent
+BLOCK_SCALAR_PATTERN = re.compile(r'^[|>][-+]?\d*$')
+
+
+def is_block_scalar_indicator(value: str) -> bool:
+    """
+    Check if value is a block scalar indicator.
+    
+    Valid indicators:
+    - |      literal block scalar
+    - |+     literal with keep chomping
+    - |-     literal with strip chomping
+    - |2     literal with explicit indent
+    - |2+    literal with indent and chomping
+    - >      folded block scalar
+    - >+, >-, >2, etc.
+    
+    NOT a block scalar (Helm pipe):
+    - {{ .Values.foo | default "bar" }}
+    """
+    v = value.strip()
+    return bool(BLOCK_SCALAR_PATTERN.match(v))
 
 
 # ============================================================================
@@ -243,10 +271,8 @@ class ContextTracker:
         
         indent = len(line) - len(line.lstrip())
         
-        # Pop contexts with same or greater indent
         self.stack = [e for e in self.stack if e.indent < indent]
         
-        # Check if this line starts a new context
         if ':' in stripped:
             temp_stripped = stripped.lstrip('- ')
             colon_pos = temp_stripped.find(':')
@@ -254,8 +280,8 @@ class ContextTracker:
                 key_part = temp_stripped[:colon_pos].strip()
                 value_part = temp_stripped[colon_pos + 1:].strip()
                 
-                # No value = new context block
-                if not value_part or value_part in ('|', '>'):
+                if not value_part or value_part in ('|', '>', '|+', '|-', '>+', '>-') or \
+                   is_block_scalar_indicator(value_part):
                     self.stack.append(ContextEntry(indent=indent, key=key_part))
         
         return self.get_path()
@@ -290,6 +316,7 @@ class UnifiedQuoteValidator:
     1. apiVersion, kind → NEVER quoted
     2. IN metadata → int/bool MUST be quoted, strings DON'T need quotes
     3. OUTSIDE metadata → int/bool must NOT be quoted, strings MUST be quoted
+    4. Block scalar content (| or >) is SKIPPED entirely
     """
     
     def __init__(self, strict: bool = False, type_map: Dict[str, str] = None):
@@ -297,6 +324,9 @@ class UnifiedQuoteValidator:
         self.type_map = type_map or {}
         self.issues: List[QuoteIssue] = []
         self.context = ContextTracker()
+        # Block scalar tracking
+        self.in_block_scalar = False
+        self.block_scalar_base_indent: int = -1
     
     def validate_file(self, file_path: str) -> ValidationResult:
         try:
@@ -313,6 +343,8 @@ class UnifiedQuoteValidator:
     def validate_content(self, content: str, file_path: str = "<string>") -> ValidationResult:
         self.issues = []
         self.context = ContextTracker()
+        self.in_block_scalar = False
+        self.block_scalar_base_indent = -1
         
         lines = content.split('\n')
         has_helm = '{{' in content
@@ -320,25 +352,55 @@ class UnifiedQuoteValidator:
         for line_num, line in enumerate(lines, 1):
             stripped = line.strip()
             
-            if not stripped or stripped.startswith('#'):
+            # Calculate current indent (0 for empty lines)
+            if stripped:
+                current_indent = len(line) - len(line.lstrip())
+            else:
+                # Empty line doesn't end block scalar
+                if self.in_block_scalar:
+                    continue
+                else:
+                    continue
+            
+            # Skip comments
+            if stripped.startswith('#'):
                 continue
             
+            # Handle document separator - reset everything
             if stripped == '---':
                 self.context.reset()
+                self.in_block_scalar = False
+                self.block_scalar_base_indent = -1
                 continue
             
-            # Skip Helm control-flow
+            # Check if we're inside a block scalar
+            if self.in_block_scalar:
+                # If indent is greater than base, still in block scalar
+                if current_indent > self.block_scalar_base_indent:
+                    # Skip this line - it's block scalar content
+                    continue
+                else:
+                    # Indent is same or less - block scalar has ended
+                    self.in_block_scalar = False
+                    self.block_scalar_base_indent = -1
+                    # Continue processing this line normally
+            
+            # Check if this line STARTS a block scalar
+            if self._line_starts_block_scalar(stripped):
+                self.in_block_scalar = True
+                self.block_scalar_base_indent = current_indent
+                # Update context for the key, but don't validate the content
+                self.context.update(line)
+                continue
+            
+            # Skip Helm control-flow lines
             if has_helm and self._is_helm_control_flow(stripped):
-                continue
-            
-            # Skip block scalar content
-            if self._is_in_block_scalar(lines, line_num - 1):
                 continue
             
             # Update context
             self.context.update(line)
             
-            # Validate
+            # Validate the line
             self._validate_line(line_num, line, stripped, has_helm)
         
         return ValidationResult(
@@ -348,35 +410,44 @@ class UnifiedQuoteValidator:
             error_count=len(self.issues)
         )
     
+    def _line_starts_block_scalar(self, stripped: str) -> bool:
+        """
+        Check if this line starts a block scalar.
+        
+        Examples that START block scalar:
+          key: |
+          key: |+
+          key: |-
+          key: >
+          key: >2
+          data: |
+        
+        Examples that are NOT block scalar (Helm pipe):
+          name: {{ .Values.name | default "foo" }}
+          value: {{ .Values.x | quote }}
+        """
+        if ':' not in stripped:
+            return False
+        
+        # Find the last colon (to handle keys like "http://")
+        # Actually, find the first colon that's a key separator
+        colon_pos = stripped.find(':')
+        if colon_pos < 0:
+            return False
+        
+        value_part = stripped[colon_pos + 1:].strip()
+        
+        # Empty value is not a block scalar (just a mapping key)
+        if not value_part:
+            return False
+        
+        # Check if it's a block scalar indicator
+        return is_block_scalar_indicator(value_part)
+    
     def _is_helm_control_flow(self, line: str) -> bool:
         for pattern in HELM_CONTROL_FLOW_PATTERNS:
             if re.match(pattern, line):
                 return True
-        return False
-    
-    def _is_in_block_scalar(self, lines: List[str], current_index: int) -> bool:
-        if current_index == 0:
-            return False
-        
-        current_indent = len(lines[current_index]) - len(lines[current_index].lstrip())
-        
-        for i in range(current_index - 1, -1, -1):
-            prev_line = lines[i]
-            prev_stripped = prev_line.strip()
-            
-            if not prev_stripped or prev_stripped.startswith('#'):
-                continue
-            
-            prev_indent = len(prev_line) - len(prev_line.lstrip())
-            
-            if prev_indent < current_indent:
-                if prev_stripped.endswith('|') or prev_stripped.endswith('>'):
-                    return True
-                return False
-            
-            if prev_indent == current_indent:
-                return False
-        
         return False
     
     def _validate_line(self, line_num: int, line: str, stripped: str, has_helm: bool):
@@ -394,7 +465,7 @@ class UnifiedQuoteValidator:
             key = kv_part[:colon_pos].strip()
             value = kv_part[colon_pos + 1:].strip()
             
-            if value and value not in ('|', '>'):
+            if value and not is_block_scalar_indicator(value):
                 self._validate_key_value(line_num, line, key, value, has_helm)
             return
         
@@ -406,7 +477,8 @@ class UnifiedQuoteValidator:
         key = stripped[:colon_pos].strip()
         value = stripped[colon_pos + 1:].strip()
         
-        if not value or value in ('|', '>'):
+        # Skip if no value or if it's a block scalar indicator
+        if not value or is_block_scalar_indicator(value):
             return
         
         self._validate_key_value(line_num, line, key, value, has_helm)
