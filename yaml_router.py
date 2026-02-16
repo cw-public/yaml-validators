@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 YAML Router - Detects file type and routes to appropriate validators.
 
@@ -310,7 +311,7 @@ class YamlRouter:
 
     def _print_success(self, message: str):
         """Print success message with green color."""
-        print(self._color(f"✓ {message}", Colors.GREEN))
+        print(self._color(f"[OK] {message}", Colors.GREEN))
 
     def _print_section(self, title: str):
         """Print section header."""
