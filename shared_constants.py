@@ -31,6 +31,8 @@ class IssueType(Enum):
     # Helm/Go-Template errors
     HELM_TEMPLATE_INT_QUOTED = "helm_template_int_quoted"
     HELM_TEMPLATE_STRING_NOT_QUOTED = "helm_template_string_not_quoted"
+    HELM_DEFAULT_NOT_QUOTED = "helm_default_not_quoted"
+    HELM_DEFAULT_OUTER_QUOTES = "helm_default_outer_quotes"
     GO_TEMPLATE_OPTIONS_NOT_QUOTED = "go_template_options_not_quoted"
     
     # Quoting style errors
@@ -39,6 +41,7 @@ class IssueType(Enum):
     URL_NOT_QUOTED = "url_not_quoted"
     PORT_STRING_NOT_QUOTED = "port_string_not_quoted"
     STRING_VALUE_NOT_QUOTED = "string_value_not_quoted"
+    FORCED_QUOTE_KEY_NOT_QUOTED = "forced_quote_key_not_quoted"
 
 
 # ============================================================================
