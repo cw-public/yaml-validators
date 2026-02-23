@@ -408,6 +408,19 @@ rules:
   document-start: disable
   truthy:
     allowed-values: ['true', 'false', 'yes', 'no']
+  braces:
+    min-spaces-inside: 1
+    max-spaces-inside: 1
+  brackets:
+    min-spaces-inside: 0
+    max-spaces-inside: 0
+  colons:
+    max-spaces-before: 0
+    max-spaces-after: 1
+  commas:
+    max-spaces-before: 0
+    min-spaces-after: 1
+    max-spaces-after: 1
 """)
 
             content = Path(file_path).read_text(encoding='utf-8')
