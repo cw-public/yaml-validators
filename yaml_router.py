@@ -5,7 +5,7 @@ YAML Router - Detects file type and routes to appropriate validators.
 
 Validation Strategy:
 - K8S/Helm: YAMLlint + Quote Validator
-- Ansible:  SKIP (handled by ansible-lint separately)
+- Ansible:  YAMLlint + Ansible Validator
 - Unknown:  YAMLlint only
 """
 
@@ -22,7 +22,6 @@ from enum import Enum
 # ============================================================================
 
 class Colors:
-    """ANSI color codes for terminal output."""
     RED = '\033[91m'
     GREEN = '\033[92m'
     YELLOW = '\033[93m'
@@ -34,7 +33,7 @@ class Colors:
 
 
 # ============================================================================
-# SHARED TYPES (fallback if shared_constants not available)
+# SHARED TYPES
 # ============================================================================
 
 class Severity(Enum):
@@ -54,13 +53,10 @@ class ValidationResult:
 # DETECTION PATTERNS
 # ============================================================================
 
-# Ansible-specific keywords that appear at root or task level
 ANSIBLE_KEYWORDS = {
-    # Playbook level
     'hosts', 'tasks', 'roles', 'handlers', 'vars', 'vars_files',
     'pre_tasks', 'post_tasks', 'gather_facts', 'become', 'become_user',
     'become_method', 'environment', 'collections', 'connection',
-    # Task level
     'when', 'register', 'notify', 'listen', 'tags', 'block', 'rescue',
     'always', 'loop', 'loop_control', 'with_items', 'with_dict',
     'with_fileglob', 'until', 'retries', 'delay', 'changed_when',
@@ -69,30 +65,18 @@ ANSIBLE_KEYWORDS = {
     'include_vars', 'set_fact', 'assert', 'fail', 'debug',
 }
 
-# Ansible module names (most common ones)
 ANSIBLE_MODULES = {
-    # Files
     'copy', 'template', 'file', 'lineinfile', 'blockinfile',
     'fetch', 'synchronize', 'unarchive', 'archive', 'stat',
-    # Commands
     'shell', 'command', 'raw', 'script', 'expect',
-    # Packages
     'apt', 'yum', 'dnf', 'pip', 'package', 'snap',
-    # Services
     'service', 'systemd', 'sysvinit',
-    # Users
     'user', 'group', 'authorized_key',
-    # System
     'hostname', 'cron', 'mount', 'sysctl', 'selinux',
-    # Network
     'uri', 'get_url', 'wait_for',
-    # Cloud
     'aws_s3', 'ec2', 'azure_rm', 'gcp_compute',
-    # Containers
     'docker_container', 'docker_image', 'k8s', 'helm',
-    # Misc
     'debug', 'pause', 'wait_for_connection', 'setup',
-    # Built-in namespace
     'ansible.builtin.copy', 'ansible.builtin.template',
     'ansible.builtin.file', 'ansible.builtin.shell',
     'ansible.builtin.command', 'ansible.builtin.debug',
@@ -100,20 +84,17 @@ ANSIBLE_MODULES = {
     'ansible.builtin.user', 'ansible.builtin.group',
     'ansible.builtin.apt', 'ansible.builtin.yum',
     'ansible.builtin.lineinfile', 'ansible.builtin.uri',
+    'ansible.builtin.get_url', 'ansible.builtin.pip',
+    'ansible.builtin.dnf', 'ansible.builtin.systemd',
+    'kubernetes.core.k8s', 'kubernetes.core.helm',
+    'kubernetes.core.helm_repository',
+    'community.hashi_vault.vault_pki_generate_certificate',
 }
 
-# Directory names that indicate Ansible structure
 ANSIBLE_DIRECTORIES = {
     'playbooks', 'roles', 'tasks', 'handlers', 'vars',
     'defaults', 'files', 'templates', 'meta', 'group_vars',
     'host_vars', 'inventories', 'inventory',
-}
-
-# Ansible filename patterns
-ANSIBLE_FILENAME_PATTERNS = {
-    'playbook', 'site.yml', 'site.yaml', 'main.yml', 'main.yaml',
-    'tasks.yml', 'tasks.yaml', 'handlers.yml', 'handlers.yaml',
-    'vars.yml', 'vars.yaml', 'defaults.yml', 'defaults.yaml',
 }
 
 
@@ -122,7 +103,6 @@ ANSIBLE_FILENAME_PATTERNS = {
 # ============================================================================
 
 class FileType:
-    """File type constants."""
     KUBERNETES = "K8S"
     HELM = "HELM"
     ANSIBLE = "ANSIBLE"
@@ -130,51 +110,30 @@ class FileType:
 
 
 def detect_file_type(file_path: str) -> str:
-    """
-    Detect if YAML file is Kubernetes, Helm template, or Ansible.
-
-    PRIORITY ORDER (important!):
-    1. Ansible - Check FIRST because Ansible also uses {{ }} like Helm
-    2. Helm templates (in templates/ or has {{ }} without Ansible keywords)
-    3. Kubernetes (apiVersion/kind without {{ }})
-    4. Unknown
-    """
+    """Detect file type: Ansible, Helm, K8S, or Unknown."""
     try:
         content = Path(file_path).read_text(encoding='utf-8')
         path_obj = Path(file_path)
 
-        # ================================================================
-        # STEP 1: Check for ANSIBLE first (before Helm!)
-        # ================================================================
+        # STEP 1: Check for ANSIBLE first
         if _is_ansible_content(content, path_obj):
             return FileType.ANSIBLE
 
-        # ================================================================
         # STEP 2: Check for HELM
-        # ================================================================
-        # Check if in Helm templates directory
         if 'templates' in path_obj.parts and 'ansible' not in str(path_obj).lower():
             return FileType.HELM
 
-        # Check for Chart.yaml or values.yaml
         if path_obj.name in ('Chart.yaml', 'values.yaml'):
             return FileType.HELM
 
-        # Check for Helm template syntax ({{ }}) - but only if NOT Ansible
         if '{{' in content and '}}' in content:
-            # Double-check it's not Ansible that slipped through
             if not _has_ansible_indicators(content):
                 return FileType.HELM
 
-        # ================================================================
         # STEP 3: Check for KUBERNETES
-        # ================================================================
         if 'apiVersion:' in content and 'kind:' in content:
             return FileType.KUBERNETES
 
-        # ================================================================
-        # STEP 4: Unknown
-        # ================================================================
         return FileType.UNKNOWN
 
     except Exception:
@@ -182,26 +141,17 @@ def detect_file_type(file_path: str) -> str:
 
 
 def _is_ansible_content(content: str, path: Path) -> bool:
-    """
-    Check if content is an Ansible playbook/role.
-
-    This checks multiple indicators to be sure.
-    """
+    """Check if content is Ansible."""
     path_str = str(path).lower()
 
-    # Check 1: Directory structure
     for ansible_dir in ANSIBLE_DIRECTORIES:
         if f'/{ansible_dir}/' in path_str or f'\\{ansible_dir}\\' in path_str:
             return True
-        if path_str.endswith(f'/{ansible_dir}') or path_str.endswith(f'\\{ansible_dir}'):
-            return True
 
-    # Check 2: Filename patterns
     filename_lower = path.name.lower()
     if 'ansible' in filename_lower or 'playbook' in filename_lower:
         return True
 
-    # Check 3: Content indicators
     if _has_ansible_indicators(content):
         return True
 
@@ -209,14 +159,8 @@ def _is_ansible_content(content: str, path: Path) -> bool:
 
 
 def _has_ansible_indicators(content: str) -> bool:
-    """
-    Check if content has Ansible-specific indicators.
-
-    Returns True if content looks like Ansible.
-    """
-    content_lower = content.lower()
+    """Check for Ansible-specific patterns."""
     lines = content.split('\n')
-
     ansible_keyword_count = 0
     ansible_module_count = 0
 
@@ -225,35 +169,28 @@ def _has_ansible_indicators(content: str) -> bool:
         if not stripped or stripped.startswith('#'):
             continue
 
-        # Check for Ansible keywords at line start
         for keyword in ANSIBLE_KEYWORDS:
-            # Pattern: "keyword:" at start of line or after "- "
             if stripped.startswith(f'{keyword}:') or \
                stripped.startswith(f'- {keyword}:') or \
                f' {keyword}:' in stripped:
                 ansible_keyword_count += 1
-                if ansible_keyword_count >= 2:  # Found 2+ keywords = Ansible
+                if ansible_keyword_count >= 2:
                     return True
 
-        # Check for Ansible modules
         for module in ANSIBLE_MODULES:
             if f'{module}:' in stripped:
                 ansible_module_count += 1
-                if ansible_module_count >= 1:  # Found any module = Ansible
+                if ansible_module_count >= 1:
                     return True
 
-    # Special check: "- name:" followed by module is very Ansible-specific
-    if '- name:' in content_lower:
-        # Check if there's also a module following it
+    if '- name:' in content.lower():
         for module in ANSIBLE_MODULES:
             if f'{module}:' in content:
                 return True
 
-    # Check for "hosts:" at root level (playbook indicator)
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith('- hosts:') or stripped == 'hosts:' or \
-           (stripped.startswith('hosts:') and not line.startswith(' ')):
+        if stripped.startswith('- hosts:') or stripped == 'hosts:':
             return True
 
     return False
@@ -269,16 +206,18 @@ class YamlRouter:
     def __init__(self,
                  use_yamllint: bool = True,
                  use_quote_validator: bool = True,
+                 use_ansible_validator: bool = True,
                  verbose: bool = False,
                  use_colors: bool = True):
         self.use_yamllint = use_yamllint
         self.use_quote_validator = use_quote_validator
+        self.use_ansible_validator = use_ansible_validator
         self.verbose = verbose
         self.use_colors = use_colors
 
-        # Initialize validators
         self.yamllint_validator = None
         self.quote_validator = None
+        self.ansible_validator = None
 
         if use_yamllint:
             self.yamllint_validator = YamlLintValidator()
@@ -291,35 +230,37 @@ class YamlRouter:
                 if verbose:
                     print("Warning: Could not import UnifiedQuoteValidator")
 
+        if use_ansible_validator:
+            try:
+                from ansible_validator import AnsibleValidator
+                self.ansible_validator = AnsibleValidator()
+            except ImportError:
+                if verbose:
+                    print("Warning: Could not import AnsibleValidator")
+
     def _color(self, text: str, color: str) -> str:
-        """Apply color to text if colors are enabled."""
         if self.use_colors:
             return f"{color}{text}{Colors.RESET}"
         return text
 
     def _print_error(self, message: str):
-        """Print error message with red color."""
         print(self._color(f"[ERROR] {message}", Colors.RED))
 
     def _print_warning(self, message: str):
-        """Print warning message with yellow color."""
         print(self._color(f"[WARNING] {message}", Colors.YELLOW))
 
     def _print_info(self, message: str):
-        """Print info message with cyan color."""
         print(self._color(f"[INFO] {message}", Colors.CYAN))
 
     def _print_success(self, message: str):
-        """Print success message with green color."""
         print(self._color(f"[OK] {message}", Colors.GREEN))
 
     def _print_section(self, title: str):
-        """Print section header."""
         print(f"\n{self._color('>', Colors.CYAN)} {self._color(title, Colors.BOLD)}")
         print(self._color("-" * 80, Colors.CYAN))
 
     def validate_files(self, file_paths: List[str]) -> int:
-        """Validate multiple files and return exit code."""
+        """Validate multiple files."""
         total_errors = 0
 
         for file_path in file_paths:
@@ -342,29 +283,11 @@ class YamlRouter:
         return 1 if total_errors > 0 else 0
 
     def _validate_with_router(self, file_path: str, file_type: str) -> ValidationResult:
-        """Route to appropriate validators based on file type."""
+        """Route to appropriate validators."""
         all_issues = []
 
         # ================================================================
-        # ANSIBLE - Skip all validation here, ansible-lint handles it
-        # ================================================================
-        if file_type == FileType.ANSIBLE:
-            self._print_section("Ansible Detected")
-            self._print_info("Skipping yaml-router validation for Ansible files.")
-            self._print_info("Ansible-Lint (WSL hook) will handle this file separately.")
-            print(self._color("-" * 80, Colors.CYAN))
-            self._print_success("Passed to ansible-lint")
-
-            # Return valid so yaml-router doesn't fail
-            return ValidationResult(
-                file_path=file_path,
-                is_valid=True,
-                issues=[],
-                error_count=0
-            )
-
-        # ================================================================
-        # YAMLlint - for K8S, Helm, and Unknown (NOT Ansible!)
+        # YAMLlint - for ALL file types
         # ================================================================
         if self.yamllint_validator:
             self._print_section("YAMLlint")
@@ -380,9 +303,30 @@ class YamlRouter:
                 self._print_success("No issues found")
 
         # ================================================================
+        # ANSIBLE - Route to Ansible Validator
+        # ================================================================
+        if file_type == FileType.ANSIBLE:
+            if self.ansible_validator:
+                self._print_section("Ansible Validator")
+                ansible_result = self.ansible_validator.validate_file(file_path)
+                if ansible_result.issues:
+                    all_issues.extend(ansible_result.issues)
+                    for issue in ansible_result.issues:
+                        self._print_error(f"Line {issue.line_number}: {issue.message}")
+                        print(f"   {self._color('PATH:', Colors.YELLOW)}     {issue.field_path}")
+                        print(f"   {self._color('CURRENT:', Colors.YELLOW)}  {issue.line_content.strip()}")
+                        print(f"   {self._color('EXPECTED:', Colors.YELLOW)} {issue.suggestion}")
+                        print()
+                else:
+                    self._print_success("No issues found")
+            else:
+                self._print_section("Ansible Detected")
+                self._print_warning("Ansible Validator not available")
+
+        # ================================================================
         # Quote Validator - ONLY for K8S and Helm
         # ================================================================
-        if self.quote_validator and file_type in (FileType.KUBERNETES, FileType.HELM):
+        elif self.quote_validator and file_type in (FileType.KUBERNETES, FileType.HELM):
             self._print_section("Quote Validator")
             quote_result = self.quote_validator.validate_file(file_path)
             if quote_result.issues:
@@ -416,12 +360,8 @@ class YamlRouter:
 # ============================================================================
 
 class YamlLintValidator:
-    """Wrapper for yamllint."""
-
     def __init__(self, config_file: Optional[str] = None):
         self.config_file = config_file
-
-        # Try to import yamllint
         try:
             from yamllint import linter
             from yamllint.config import YamlLintConfig
@@ -432,21 +372,13 @@ class YamlLintValidator:
             self.available = False
 
     def validate_file(self, file_path: str) -> ValidationResult:
-        """Validate file with yamllint."""
         if not self.available:
-            return ValidationResult(
-                file_path=file_path,
-                is_valid=True,
-                issues=[],
-                error_count=0
-            )
+            return ValidationResult(file_path=file_path, is_valid=True, issues=[], error_count=0)
 
         try:
-            # Load config
             if self.config_file and Path(self.config_file).exists():
                 config = self.YamlLintConfig(file=self.config_file)
             else:
-                # Default config
                 config = self.YamlLintConfig("""
 extends: default
 rules:
@@ -461,11 +393,9 @@ rules:
     allowed-values: ['true', 'false', 'yes', 'no']
 """)
 
-            # Run yamllint
             content = Path(file_path).read_text(encoding='utf-8')
             problems = list(self.linter.run(content, config))
 
-            # Convert to our format
             issues = []
             for problem in problems:
                 issue = type('Issue', (), {
@@ -498,26 +428,20 @@ rules:
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description='YAML Router - Routes to appropriate validators',
-        epilog='''
-Validation Strategy:
-  K8S/Helm:  YAMLlint + Quote Validator
-  Ansible:   SKIP (handled by ansible-lint separately)
-  Unknown:   YAMLlint only
-        '''
-    )
+    parser = argparse.ArgumentParser(description='YAML Router')
     parser.add_argument('files', nargs='+', help='YAML files to validate')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
-    parser.add_argument('--no-yamllint', action='store_true', help='Disable yamllint')
-    parser.add_argument('--no-quotes', action='store_true', help='Disable quote validator')
-    parser.add_argument('--no-color', action='store_true', help='Disable colored output')
+    parser.add_argument('-v', '--verbose', action='store_true')
+    parser.add_argument('--no-yamllint', action='store_true')
+    parser.add_argument('--no-quotes', action='store_true')
+    parser.add_argument('--no-ansible', action='store_true')
+    parser.add_argument('--no-color', action='store_true')
 
     args = parser.parse_args()
 
     router = YamlRouter(
         use_yamllint=not args.no_yamllint,
         use_quote_validator=not args.no_quotes,
+        use_ansible_validator=not args.no_ansible,
         verbose=args.verbose,
         use_colors=not args.no_color
     )
