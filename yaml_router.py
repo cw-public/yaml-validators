@@ -4,9 +4,11 @@
 YAML Router - Detects file type and routes to appropriate validators.
 
 Validation Strategy:
-- K8S/Helm: YAMLlint + Quote Validator
-- Ansible:  YAMLlint + Ansible Validator
+- K8S/Helm: YAMLlint + UnifiedValidator (Helm/K8S mode)
+- Ansible:  YAMLlint + UnifiedValidator (Ansible mode)
 - Unknown:  YAMLlint only
+
+Version: 2.0.0 - Uses unified_validator.py for all validation
 """
 
 import sys
@@ -15,6 +17,11 @@ from pathlib import Path
 from typing import List, Optional
 from dataclasses import dataclass, field as dataclass_field
 from enum import Enum
+
+# Add script directory to path for imports
+SCRIPT_DIR = Path(__file__).parent.absolute()
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 
 # ============================================================================
@@ -205,38 +212,32 @@ class YamlRouter:
 
     def __init__(self,
                  use_yamllint: bool = True,
-                 use_quote_validator: bool = True,
-                 use_ansible_validator: bool = True,
+                 use_unified_validator: bool = True,
                  verbose: bool = False,
                  use_colors: bool = True):
         self.use_yamllint = use_yamllint
-        self.use_quote_validator = use_quote_validator
-        self.use_ansible_validator = use_ansible_validator
+        self.use_unified_validator = use_unified_validator
         self.verbose = verbose
         self.use_colors = use_colors
 
         self.yamllint_validator = None
-        self.quote_validator = None
-        self.ansible_validator = None
+        self.unified_validator = None
 
+        # Initialize YAMLlint
         if use_yamllint:
             self.yamllint_validator = YamlLintValidator()
 
-        if use_quote_validator:
+        # Initialize Unified Validator
+        if use_unified_validator:
             try:
-                from unified_validator import UnifiedQuoteValidator
-                self.quote_validator = UnifiedQuoteValidator()
-            except ImportError:
+                from unified_validator import UnifiedValidator, FileType as UnifiedFileType
+                self.unified_validator = UnifiedValidator()
+                self.UnifiedFileType = UnifiedFileType
+            except ImportError as e:
                 if verbose:
-                    print("Warning: Could not import UnifiedQuoteValidator")
-
-        if use_ansible_validator:
-            try:
-                from ansible_validator import AnsibleValidator
-                self.ansible_validator = AnsibleValidator()
-            except ImportError:
-                if verbose:
-                    print("Warning: Could not import AnsibleValidator")
+                    print(f"Warning: Could not import UnifiedValidator: {e}")
+                self.unified_validator = None
+                self.UnifiedFileType = None
 
     def _color(self, text: str, color: str) -> str:
         if self.use_colors:
@@ -303,35 +304,28 @@ class YamlRouter:
                 self._print_success("No issues found")
 
         # ================================================================
-        # ANSIBLE - Route to Ansible Validator
+        # Unified Validator - for ALL detected file types
         # ================================================================
-        if file_type == FileType.ANSIBLE:
-            if self.ansible_validator:
-                self._print_section("Ansible Validator")
-                ansible_result = self.ansible_validator.validate_file(file_path)
-                if ansible_result.issues:
-                    all_issues.extend(ansible_result.issues)
-                    for issue in ansible_result.issues:
-                        self._print_error(f"Line {issue.line_number}: {issue.message}")
-                        print(f"   {self._color('PATH:', Colors.YELLOW)}     {issue.field_path}")
-                        print(f"   {self._color('CURRENT:', Colors.YELLOW)}  {issue.line_content.strip()}")
-                        print(f"   {self._color('EXPECTED:', Colors.YELLOW)} {issue.suggestion}")
-                        print()
-                else:
-                    self._print_success("No issues found")
+        if self.unified_validator:
+            # Map router FileType to unified_validator FileType
+            unified_file_type = self._map_file_type(file_type)
+            
+            # Determine section title based on file type
+            if file_type == FileType.ANSIBLE:
+                section_title = "Ansible Validator"
+            elif file_type in (FileType.HELM, FileType.KUBERNETES):
+                section_title = "Quote Validator"
             else:
-                self._print_section("Ansible Detected")
-                self._print_warning("Ansible Validator not available")
+                section_title = "YAML Validator"
 
-        # ================================================================
-        # Quote Validator - ONLY for K8S and Helm
-        # ================================================================
-        elif self.quote_validator and file_type in (FileType.KUBERNETES, FileType.HELM):
-            self._print_section("Quote Validator")
-            quote_result = self.quote_validator.validate_file(file_path)
-            if quote_result.issues:
-                all_issues.extend(quote_result.issues)
-                for issue in quote_result.issues:
+            self._print_section(section_title)
+            
+            # Run unified validator with appropriate file type
+            validator_result = self.unified_validator.validate_file(file_path, unified_file_type)
+            
+            if validator_result.issues:
+                all_issues.extend(validator_result.issues)
+                for issue in validator_result.issues:
                     self._print_error(f"Line {issue.line_number}: {issue.message}")
                     print(f"   {self._color('PATH:', Colors.YELLOW)}     {issue.field_path}")
                     print(f"   {self._color('CURRENT:', Colors.YELLOW)}  {issue.line_content.strip()}")
@@ -339,6 +333,14 @@ class YamlRouter:
                     print()
             else:
                 self._print_success("No issues found")
+        else:
+            # Unified validator not available
+            if file_type == FileType.ANSIBLE:
+                self._print_section("Ansible Validator")
+                self._print_warning("Unified Validator not available")
+            elif file_type in (FileType.HELM, FileType.KUBERNETES):
+                self._print_section("Quote Validator")
+                self._print_warning("Unified Validator not available")
 
         # ================================================================
         # Summary
@@ -354,12 +356,27 @@ class YamlRouter:
             error_count=len(all_issues)
         )
 
+    def _map_file_type(self, router_file_type: str):
+        """Map router FileType to unified_validator FileType."""
+        if self.UnifiedFileType is None:
+            return None
+            
+        mapping = {
+            FileType.ANSIBLE: self.UnifiedFileType.ANSIBLE,
+            FileType.HELM: self.UnifiedFileType.HELM,
+            FileType.KUBERNETES: self.UnifiedFileType.KUBERNETES,
+            FileType.UNKNOWN: self.UnifiedFileType.UNKNOWN,
+        }
+        return mapping.get(router_file_type, self.UnifiedFileType.UNKNOWN)
+
 
 # ============================================================================
 # YAMLLINT VALIDATOR
 # ============================================================================
 
 class YamlLintValidator:
+    """YAMLlint wrapper for basic YAML syntax validation."""
+    
     def __init__(self, config_file: Optional[str] = None):
         self.config_file = config_file
         try:
@@ -428,20 +445,38 @@ rules:
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description='YAML Router')
+    parser = argparse.ArgumentParser(
+        description='YAML Router - Routes YAML files to appropriate validators',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python yaml_router.py file.yaml
+  python yaml_router.py *.yaml
+  python yaml_router.py --no-yamllint file.yaml
+  python yaml_router.py -v file1.yaml file2.yaml
+
+Supported file types:
+  - ANSIBLE: Playbooks, tasks, roles (auto-detected)
+  - HELM:    Helm templates with {{ }} (auto-detected)
+  - K8S:     Kubernetes manifests with apiVersion/kind (auto-detected)
+  - UNKNOWN: Falls back to YAMLlint only
+"""
+    )
     parser.add_argument('files', nargs='+', help='YAML files to validate')
-    parser.add_argument('-v', '--verbose', action='store_true')
-    parser.add_argument('--no-yamllint', action='store_true')
-    parser.add_argument('--no-quotes', action='store_true')
-    parser.add_argument('--no-ansible', action='store_true')
-    parser.add_argument('--no-color', action='store_true')
+    parser.add_argument('-v', '--verbose', action='store_true', 
+                        help='Enable verbose output')
+    parser.add_argument('--no-yamllint', action='store_true',
+                        help='Disable YAMLlint validation')
+    parser.add_argument('--no-validator', action='store_true',
+                        help='Disable unified validator (quote/ansible checks)')
+    parser.add_argument('--no-color', action='store_true',
+                        help='Disable colored output')
 
     args = parser.parse_args()
 
     router = YamlRouter(
         use_yamllint=not args.no_yamllint,
-        use_quote_validator=not args.no_quotes,
-        use_ansible_validator=not args.no_ansible,
+        use_unified_validator=not args.no_validator,
         verbose=args.verbose,
         use_colors=not args.no_color
     )
