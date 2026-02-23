@@ -204,6 +204,27 @@ def _has_ansible_indicators(content: str) -> bool:
 
 
 # ============================================================================
+# YAMLLINT CONFIG
+# ============================================================================
+
+YAMLLINT_CONFIG = """\
+extends: default
+rules:
+  line-length:
+    max: 160
+  indentation:
+    spaces: 2
+  comments:
+    min-spaces-from-content: 2
+  document-start: disable
+  truthy:
+    allowed-values: ['true', 'false', 'yes', 'no']
+  braces: disable
+  brackets: disable
+"""
+
+
+# ============================================================================
 # YAML ROUTER
 # ============================================================================
 
@@ -379,40 +400,38 @@ class YamlLintValidator:
     
     def __init__(self, config_file: Optional[str] = None):
         self.config_file = config_file
+        self.config = None
+        self.linter = None
+        self.available = False
+        
         try:
             from yamllint import linter
             from yamllint.config import YamlLintConfig
             self.linter = linter
-            self.YamlLintConfig = YamlLintConfig
             self.available = True
+            
+            # Build config at init time
+            if self.config_file and Path(self.config_file).exists():
+                self.config = YamlLintConfig(file=self.config_file)
+            else:
+                self.config = YamlLintConfig(content=YAMLLINT_CONFIG)
+                
         except ImportError:
             self.available = False
 
     def validate_file(self, file_path: str) -> ValidationResult:
-        if not self.available:
-            return ValidationResult(file_path=file_path, is_valid=True, issues=[], error_count=0)
+        """Validate a file with yamllint."""
+        if not self.available or self.config is None:
+            return ValidationResult(
+                file_path=file_path,
+                is_valid=True,
+                issues=[],
+                error_count=0
+            )
 
         try:
-            if self.config_file and Path(self.config_file).exists():
-                config = self.YamlLintConfig(file=self.config_file)
-            else:
-                config = self.YamlLintConfig("""
-extends: default
-rules:
-  line-length:
-    max: 160
-  indentation:
-    spaces: 2
-  comments:
-    min-spaces-from-content: 2
-  document-start: disable
-  truthy:
-    allowed-values: ['true', 'false', 'yes', 'no']
-  braces: disable
-""")
-
             content = Path(file_path).read_text(encoding='utf-8')
-            problems = list(self.linter.run(content, config))
+            problems = list(self.linter.run(content, self.config))
 
             issues = []
             for problem in problems:
@@ -434,7 +453,11 @@ rules:
             return ValidationResult(
                 file_path=file_path,
                 is_valid=False,
-                issues=[type('Issue', (), {'message': f"Error: {e}", 'field_path': ''})()],
+                issues=[type('Issue', (), {
+                    'message': f"Error: {e}",
+                    'field_path': '',
+                    'line_number': 0
+                })()],
                 error_count=1
             )
 
